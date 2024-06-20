@@ -399,7 +399,7 @@ cdef class PgenReader:
 
     def __cinit__(self, bytes filename, object raw_sample_ct = None,
                   object variant_ct = None, object sample_subset = None,
-                  object allele_idx_offsets = None, object pvar = None):
+                  object allele_idx_offsets = None, object pvar = None, object threads = 1):
         self._info_ptr = <PgenFileInfo*>PyMem_Malloc(sizeof(PgenFileInfo))
         if not self._info_ptr:
             raise MemoryError()

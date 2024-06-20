@@ -19,7 +19,7 @@ cd plink-ng/2.0/Python
 
 Then install Cython and NumPy:
 ```
-pip3 install "cython>=0.29.21" "numpy>=1.19.0"
+pip3 install -r dev-requirements.txt
 ```
 
 and then build and install the package

@@ -1149,7 +1149,7 @@ cdef class PgenReader:
         raise RuntimeError("read_alleles_and_phasepresent_range() does not support hap_maj == 1 yet.")
 
 
-    cpdef read_alleles_and_phasepresent_list(self, np.ndarray[np.uint32_t] variant_idxs, np.ndarray[np.int32_t,mode="c",ndim=2] allele_int32_out, np.ndarray[np.uint8_t,cast=True,mode="c",ndim=2] phasepresent_out, bint hap_maj = 0) nogil:
+    cpdef read_alleles_and_phasepresent_list(self, np.ndarray[np.uint32_t] variant_idxs, np.ndarray[np.int32_t,mode="c",ndim=2] allele_int32_out, np.ndarray[np.uint8_t,cast=True,mode="c",ndim=2] phasepresent_out, bint hap_maj = 0):
         # if hap_maj == False, allele_int32_out must have at least
         #   variant_idx_ct rows, 2 * sample_ct columns
         # if hap_maj == True, allele_int32_out must have at least 2 * sample_ct
@@ -1188,7 +1188,8 @@ cdef class PgenReader:
                     raise RuntimeError("read_alleles_and_phasepresent_list() error " + str(reterr))
                 main_data_ptr = <int32_t*>(&(allele_int32_out[variant_list_idx, 0]))
                 phasepresent_data_ptr = <unsigned char*>(&(phasepresent_out[variant_list_idx, 0]))
-                GenoarrPhasedToAlleleCodesMinus9(genovec, phasepresent, phaseinfo, subset_size, phasepresent_ct, phasepresent_data_ptr, main_data_ptr)
+                with nogil:
+                    GenoarrPhasedToAlleleCodesMinus9(genovec, phasepresent, phaseinfo, subset_size, phasepresent_ct, phasepresent_data_ptr, main_data_ptr)
             return
         raise RuntimeError("read_alleles_and_phasepresent_list() does not support hap_maj == 1 yet.")
 

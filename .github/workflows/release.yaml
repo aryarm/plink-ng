@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: [7, 8, 9, 10, 11, 12]
+        python: [7, 8, 9, 10, 11, 12, 13]
         os: [ubuntu, macos]
         arch: [x86_64, aarch64, universal2]
         exclude:

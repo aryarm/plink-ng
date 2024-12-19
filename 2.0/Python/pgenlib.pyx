@@ -495,7 +495,8 @@ cdef class PgenReader:
                 if reterr != kPglRetSuccess:
                     raise RuntimeError("read_range() error " + str(reterr))
                 data_ptr = &(geno_int8_out[(variant_idx - variant_idx_start), 0])
-                GenoarrToBytesMinus9(genovec, subset_size, data_ptr)
+                with nogil:
+                    GenoarrToBytesMinus9(genovec, subset_size, data_ptr)
             return
         if variant_idx_start >= variant_idx_end:
             raise RuntimeError("read_range() variant_idx_start >= variant_idx_end (" + str(variant_idx_start) + ", " + str(variant_idx_end) + ")")
@@ -535,7 +536,8 @@ cdef class PgenReader:
                 TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
                 for uii in range(sample_batch_size):
                     data_ptr = &(geno_int8_out[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch])
-                    GenoarrToBytesMinus9(smaj_iter, variant_batch_size, data_ptr)
+                    with nogil:
+                        GenoarrToBytesMinus9(smaj_iter, variant_batch_size, data_ptr)
                     smaj_iter = &(smaj_iter[kPglNypTransposeWords])
                 vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
             variant_idx_offset += kPglNypTransposeBatch
@@ -561,7 +563,8 @@ cdef class PgenReader:
                 if reterr != kPglRetSuccess:
                     raise RuntimeError("read_range() error " + str(reterr))
                 data_ptr = <int32_t*>(&(geno_int32_out[(variant_idx - variant_idx_start), 0]))
-                GenoarrToInt32sMinus9(genovec, subset_size, data_ptr)
+                with nogil:
+                    GenoarrToInt32sMinus9(genovec, subset_size, data_ptr)
             return
         if variant_idx_start >= variant_idx_end:
             raise RuntimeError("read_range() variant_idx_start >= variant_idx_end (" + str(variant_idx_start) + ", " + str(variant_idx_end) + ")")
@@ -601,7 +604,8 @@ cdef class PgenReader:
                 TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
                 for uii in range(sample_batch_size):
                     data_ptr = <int32_t*>(&(geno_int32_out[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch]))
-                    GenoarrToInt32sMinus9(smaj_iter, variant_batch_size, data_ptr)
+                    with nogil:
+                        GenoarrToInt32sMinus9(smaj_iter, variant_batch_size, data_ptr)
                     smaj_iter = &(smaj_iter[kPglNypTransposeWords])
                 vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
             variant_idx_offset += kPglNypTransposeBatch
@@ -627,7 +631,8 @@ cdef class PgenReader:
                 if reterr != kPglRetSuccess:
                     raise RuntimeError("read_range() error " + str(reterr))
                 data_ptr = &(geno_int64_out[(variant_idx - variant_idx_start), 0])
-                GenoarrToInt64sMinus9(genovec, subset_size, data_ptr)
+                with nogil:
+                    GenoarrToInt64sMinus9(genovec, subset_size, data_ptr)
             return
         if variant_idx_start >= variant_idx_end:
             raise RuntimeError("read_range() variant_idx_start >= variant_idx_end (" + str(variant_idx_start) + ", " + str(variant_idx_end) + ")")
@@ -667,7 +672,8 @@ cdef class PgenReader:
                 TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
                 for uii in range(sample_batch_size):
                     data_ptr = &(geno_int64_out[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch])
-                    GenoarrToInt64sMinus9(smaj_iter, variant_batch_size, data_ptr)
+                    with nogil:
+                        GenoarrToInt64sMinus9(smaj_iter, variant_batch_size, data_ptr)
                     smaj_iter = &(smaj_iter[kPglNypTransposeWords])
                 vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
             variant_idx_offset += kPglNypTransposeBatch
@@ -712,7 +718,8 @@ cdef class PgenReader:
                 if reterr != kPglRetSuccess:
                     raise RuntimeError("read_range() error " + str(reterr))
                 data_ptr = &(geno_int8_out[variant_list_idx, 0])
-                GenoarrToBytesMinus9(genovec, subset_size, data_ptr)
+                with nogil:
+                    GenoarrToBytesMinus9(genovec, subset_size, data_ptr)
             return
         if geno_int8_out.shape[0] < subset_size:
             raise RuntimeError("Sample-major read_list() geno_int_out buffer has too few rows (" + str(geno_int8_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ")")
@@ -753,7 +760,8 @@ cdef class PgenReader:
                 TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
                 for uii in range(sample_batch_size):
                     data_ptr = &(geno_int8_out[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch])
-                    GenoarrToBytesMinus9(smaj_iter, variant_batch_size, data_ptr)
+                    with nogil:
+                        GenoarrToBytesMinus9(smaj_iter, variant_batch_size, data_ptr)
                     smaj_iter = &(smaj_iter[kPglNypTransposeWords])
                 vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
             variant_list_idx += kPglNypTransposeBatch
@@ -784,7 +792,8 @@ cdef class PgenReader:
                 if reterr != kPglRetSuccess:
                     raise RuntimeError("read_range() error " + str(reterr))
                 data_ptr = <int32_t*>(&(geno_int32_out[variant_list_idx, 0]))
-                GenoarrToInt32sMinus9(genovec, subset_size, data_ptr)
+                with nogil:
+                    GenoarrToInt32sMinus9(genovec, subset_size, data_ptr)
             return
         if geno_int32_out.shape[0] < subset_size:
             raise RuntimeError("Sample-major read_list() geno_int_out buffer has too few rows (" + str(geno_int32_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ")")
@@ -825,7 +834,8 @@ cdef class PgenReader:
                 TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
                 for uii in range(sample_batch_size):
                     data_ptr = <int32_t*>(&(geno_int32_out[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch]))
-                    GenoarrToInt32sMinus9(smaj_iter, variant_batch_size, data_ptr)
+                    with nogil:
+                        GenoarrToInt32sMinus9(smaj_iter, variant_batch_size, data_ptr)
                     smaj_iter = &(smaj_iter[kPglNypTransposeWords])
                 vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
             variant_list_idx += kPglNypTransposeBatch
@@ -856,7 +866,8 @@ cdef class PgenReader:
                 if reterr != kPglRetSuccess:
                     raise RuntimeError("read_range() error " + str(reterr))
                 data_ptr = &(geno_int64_out[variant_list_idx, 0])
-                GenoarrToInt64sMinus9(genovec, subset_size, data_ptr)
+                with nogil:
+                    GenoarrToInt64sMinus9(genovec, subset_size, data_ptr)
             return
         if geno_int64_out.shape[0] < subset_size:
             raise RuntimeError("Sample-major read_list() geno_int_out buffer has too few rows (" + str(geno_int64_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ")")
@@ -897,7 +908,8 @@ cdef class PgenReader:
                 TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
                 for uii in range(sample_batch_size):
                     data_ptr = &(geno_int64_out[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch])
-                    GenoarrToInt64sMinus9(smaj_iter, variant_batch_size, data_ptr)
+                    with nogil:
+                        GenoarrToInt64sMinus9(smaj_iter, variant_batch_size, data_ptr)
                     smaj_iter = &(smaj_iter[kPglNypTransposeWords])
                 vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
             variant_list_idx += kPglNypTransposeBatch
@@ -1225,7 +1237,8 @@ cdef class PgenReader:
                 if reterr != kPglRetSuccess:
                     raise RuntimeError("read_dosages_range() error " + str(reterr))
                 data32_ptr = <float*>(&(floatarr_out[(variant_idx - variant_idx_start), 0]))
-                Dosage16ToFloatsMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data32_ptr)
+                with nogil:
+                    Dosage16ToFloatsMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data32_ptr)
             return
         raise RuntimeError("read_dosages_range() does not support sample_maj == 1 yet.")
 
@@ -1249,7 +1262,8 @@ cdef class PgenReader:
                 if reterr != kPglRetSuccess:
                     raise RuntimeError("read_dosages_range() error " + str(reterr))
                 data64_ptr = <double*>(&(floatarr_out[(variant_idx - variant_idx_start), 0]))
-                Dosage16ToDoublesMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data64_ptr)
+                with nogil:
+                    Dosage16ToDoublesMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data64_ptr)
             return
         raise RuntimeError("read_dosages_range() does not support sample_maj == 1 yet.")
 
@@ -1294,7 +1308,8 @@ cdef class PgenReader:
                 if reterr != kPglRetSuccess:
                     raise RuntimeError("read_range() error " + str(reterr))
                 data32_ptr = <float*>(&(floatarr_out[variant_list_idx, 0]))
-                Dosage16ToFloatsMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data32_ptr)
+                with nogil:
+                    Dosage16ToFloatsMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data32_ptr)
             return
         raise RuntimeError("read_dosages_list() does not support sample_maj == 1 yet.")
 
@@ -1327,7 +1342,8 @@ cdef class PgenReader:
                 if reterr != kPglRetSuccess:
                     raise RuntimeError("read_range() error " + str(reterr))
                 data64_ptr = <double*>(&(floatarr_out[variant_list_idx, 0]))
-                Dosage16ToDoublesMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data64_ptr)
+                with nogil:
+                    Dosage16ToDoublesMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data64_ptr)
             return
         raise RuntimeError("read_dosages_list() does not support sample_maj == 1 yet.")
 

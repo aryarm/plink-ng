@@ -12,7 +12,15 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-13, macos-latest]
-        python-version: [9, 10, 11, 12, 13]
+        python-version: [7, 8, 9, 10, 11, 12, 13]
+        exclude:
+          - python-version: 7
+            os: macos-latest
+          - python-version: 7
+            os: ubuntu-latest
+        include:
+          - python-version: 7
+            os: ubuntu-22.04
 
     steps:
       - name: Checkout
@@ -59,6 +67,8 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+        # We use the minimum and maximum supported versions of python that are not
+        # "end-of-life" or "feature": https://devguide.python.org/versions
         python-version: [9, 13]
 
     steps:

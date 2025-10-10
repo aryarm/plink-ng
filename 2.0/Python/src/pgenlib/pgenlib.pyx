@@ -597,8 +597,9 @@ cdef class PgenReader:
             raise RuntimeError("read() geno_int_out is too small (" + str(geno_int_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ").")
 
         cdef uintptr_t* genovec = self._pgv.genovec
+        cdef PglErr reterr
         with nogil:
-            cdef PglErr reterr = PgrGet1(self._subset_include_vec, self._subset_index, subset_size, variant_idx, allele_idx, self._state_ptr, genovec)
+            reterr = PgrGet1(self._subset_include_vec, self._subset_index, subset_size, variant_idx, allele_idx, self._state_ptr, genovec)
         if reterr != kPglRetSuccess:
             raise RuntimeError("read() error " + str(reterr))
         cdef int8_t* data8_ptr
@@ -628,8 +629,9 @@ cdef class PgenReader:
             raise RuntimeError("read_dosages() floatarr_out is too small (" + str(floatarr_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ").")
 
         cdef uint32_t dosage_ct
+        cdef PglErr reterr
         with nogil:
-            cdef PglErr reterr = PgrGet1D(self._subset_include_vec, self._subset_index, subset_size, variant_idx, allele_idx, self._state_ptr, self._pgv.genovec, self._pgv.dosage_present, self._pgv.dosage_main, &dosage_ct)
+            reterr = PgrGet1D(self._subset_include_vec, self._subset_index, subset_size, variant_idx, allele_idx, self._state_ptr, self._pgv.genovec, self._pgv.dosage_present, self._pgv.dosage_main, &dosage_ct)
         if reterr != kPglRetSuccess:
             raise RuntimeError("read_dosages() error " + str(reterr))
         cdef float* data32_ptr
@@ -652,8 +654,9 @@ cdef class PgenReader:
         if allele_int32_out.shape[0] < subset_size:
             raise RuntimeError("read_alleles() allele_int32_out is too small (" + str(allele_int32_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ").")
 
+        cdef PglErr reterr
         with nogil:
-            cdef PglErr reterr = PgrGetMP(self._subset_include_vec, self._subset_index, subset_size, variant_idx, self._state_ptr, &self._pgv)
+            reterr = PgrGetMP(self._subset_include_vec, self._subset_index, subset_size, variant_idx, self._state_ptr, &self._pgv)
         if reterr != kPglRetSuccess:
             raise RuntimeError("read_alleles() error " + str(reterr))
         cdef int32_t* main_data_ptr = <int32_t*>(&(allele_int32_out[0]))
@@ -670,8 +673,9 @@ cdef class PgenReader:
         if phasepresent_out.shape[0] < subset_size:
             raise RuntimeError("read_alleles_and_phasepresent() phasepresent_out is too small (" + str(phasepresent_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ").")
 
+        cdef PglErr reterr
         with nogil:
-            cdef PglErr reterr = PgrGetMP(self._subset_include_vec, self._subset_index, subset_size, variant_idx, self._state_ptr, &self._pgv)
+            reterr = PgrGetMP(self._subset_include_vec, self._subset_index, subset_size, variant_idx, self._state_ptr, &self._pgv)
         if reterr != kPglRetSuccess:
             raise RuntimeError("read_alleles_and_phasepresent() error " + str(reterr))
         cdef int32_t* main_data_ptr = <int32_t*>(&(allele_int32_out[0]))

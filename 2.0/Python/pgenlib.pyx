@@ -379,8 +379,9 @@ cdef class PgenReader:
             raise RuntimeError("read() geno_int_out is too small (" + str(geno_int_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ").")
 
         cdef uintptr_t* genovec = self._genovec
+        cdef PglErr reterr
         with nogil:
-            cdef PglErr reterr = PgrGet1(self._subset_include_vec, self._subset_index, subset_size, variant_idx, allele_idx, self._state_ptr, genovec)
+            reterr = PgrGet1(self._subset_include_vec, self._subset_index, subset_size, variant_idx, allele_idx, self._state_ptr, genovec)
         if reterr != kPglRetSuccess:
             raise RuntimeError("read() error " + str(reterr))
         cdef int8_t* data8_ptr
@@ -410,8 +411,9 @@ cdef class PgenReader:
             raise RuntimeError("read_dosages() floatarr_out is too small (" + str(floatarr_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ").")
 
         cdef uint32_t dosage_ct
+        cdef PglErr reterr
         with nogil:
-            cdef PglErr reterr = PgrGet1D(self._subset_include_vec, self._subset_index, subset_size, variant_idx, allele_idx, self._state_ptr, self._genovec, self._dosage_present, self._dosage_main, &dosage_ct)
+            reterr = PgrGet1D(self._subset_include_vec, self._subset_index, subset_size, variant_idx, allele_idx, self._state_ptr, self._genovec, self._dosage_present, self._dosage_main, &dosage_ct)
         if reterr != kPglRetSuccess:
             raise RuntimeError("read_dosages() error " + str(reterr))
         cdef float* data32_ptr
@@ -435,9 +437,10 @@ cdef class PgenReader:
             raise RuntimeError("read_alleles() allele_int32_out is too small (" + str(allele_int32_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ").")
 
         cdef uint32_t phasepresent_ct
+        cdef PglErr reterr
         # upgrade to multiallelic version of this function in the future
         with nogil:
-            cdef PglErr reterr = PgrGetP(self._subset_include_vec, self._subset_index, subset_size, variant_idx, self._state_ptr, self._genovec, self._phasepresent, self._phaseinfo, &phasepresent_ct)
+            reterr = PgrGetP(self._subset_include_vec, self._subset_index, subset_size, variant_idx, self._state_ptr, self._genovec, self._phasepresent, self._phaseinfo, &phasepresent_ct)
         if reterr != kPglRetSuccess:
             raise RuntimeError("read_alleles() error " + str(reterr))
         cdef int32_t* main_data_ptr = <int32_t*>(&(allele_int32_out[0]))
@@ -455,9 +458,10 @@ cdef class PgenReader:
             raise RuntimeError("read_alleles_and_phasepresent() phasepresent_out is too small (" + str(phasepresent_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ").")
 
         cdef uint32_t phasepresent_ct
+        cdef PglErr reterr
         # upgrade to multiallelic version of this function in the future
         with nogil:
-            cdef PglErr reterr = PgrGetP(self._subset_include_vec, self._subset_index, subset_size, variant_idx, self._state_ptr, self._genovec, self._phasepresent, self._phaseinfo, &phasepresent_ct)
+            reterr = PgrGetP(self._subset_include_vec, self._subset_index, subset_size, variant_idx, self._state_ptr, self._genovec, self._phasepresent, self._phaseinfo, &phasepresent_ct)
         if reterr != kPglRetSuccess:
             raise RuntimeError("read_alleles_and_phasepresent() error " + str(reterr))
         cdef int32_t* main_data_ptr = <int32_t*>(&(allele_int32_out[0]))
@@ -1359,8 +1363,9 @@ cdef class PgenReader:
         if allele_idx is None:
             allele_idx = 1
         cdef uint32_t* data_ptr = <uint32_t*>(&(genocount_uint32_out[0]))
+        cdef PglErr reterr
         with nogil:
-            cdef PglErr reterr = PgrGetCounts(self._subset_include_vec, self._subset_include_interleaved_vec, self._subset_index, self._subset_size, variant_idx, self._state_ptr, data_ptr)
+            reterr = PgrGetCounts(self._subset_include_vec, self._subset_include_interleaved_vec, self._subset_index, self._subset_size, variant_idx, self._state_ptr, data_ptr)
         if reterr != kPglRetSuccess:
             raise RuntimeError("count() error " + str(reterr))
         if allele_idx != 0:

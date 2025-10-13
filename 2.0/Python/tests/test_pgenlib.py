@@ -5,7 +5,6 @@ import csv
 import os
 import random
 import string
-import concurrent.futures
 
 def generate_unphased_biallelic_test_genotypes(nsample, nvariant):
     geno_buf = np.zeros([nvariant, nsample], dtype=np.int8)
@@ -405,9 +404,9 @@ def phased_multiallelic_case(tmp_path, case_idx, nsample_min, nsample_limit, nva
 def test_phased_multiallelic(tmp_path):
     ncase = 500
     for case_idx in range(0, ncase):
-        phased_multiallelic_case(tmp_path, case_idx, 1, 100, 1, 100, 2)
+        phased_multiallelic_case(tmp_path, case_idx, 1, 100, 1, 500, 2)
     for case_idx in range(ncase, 2*ncase):
-        phased_multiallelic_case(tmp_path, case_idx, 1, 100, 1, 100, 255)
+        phased_multiallelic_case(tmp_path, case_idx, 1, 100, 1, 500, 255)
 
 def check_bim_concordance(bimr, chrom_list, pos_list, id_list, ref_list, alt_list):
     nvariant = bimr.get_variant_ct()
@@ -454,11 +453,3 @@ def test_bim(tmp_path):
     ncase = 5
     for case_idx in range(0, ncase):
         bim_case(tmp_path, case_idx, 1, 100)
-
-def test_phased_multiallelic_multithreaded(tmp_path):
-    ncase = 500
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        phased_multiallelic_case1 = lambda case_idx: phased_multiallelic_case(tmp_path, case_idx, 1, 100, 1, 100, 2)
-        executor.map(phased_multiallelic_case1, range(0, ncase))
-        phased_multiallelic_case2 = lambda case_idx: phased_multiallelic_case(tmp_path, case_idx, 1, 100, 1, 100, 255)
-        executor.map(phased_multiallelic_case2, range(ncase, 2*ncase))

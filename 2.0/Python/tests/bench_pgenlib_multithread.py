@@ -28,24 +28,20 @@ def timed_read(file_path):
     return elapsed, arr
 
 def threaded_timed_read(file_path, n_threads=4):
-    with pgenlib.PgenReader(str(file_path).encode()) as r:
-        num_vars = r.get_variant_ct()
-        arr = np.empty([num_vars, r.get_raw_sample_ct()*2], dtype=np.int32)
-        def do_reads(start, end):
-            with pgenlib.PgenReader(str(file_path).encode()) as o:
-                o.read_alleles_range(start, end, arr[start:end])
-        start = time.time()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
-            futures = []
-            chunk_size = (num_vars + n_threads - 1) // n_threads
-            for i in range(n_threads):
-                start_idx = i * chunk_size
-                end_idx = min((i + 1) * chunk_size, num_vars)
-                futures.append(executor.submit(do_reads, start_idx, end_idx))
-            for future in futures:
-                future.result()
-        elapsed = time.time() - start
-    return elapsed, arr
+    file_path = str(file_path).encode()
+    with pgenlib.PgenReader(file_path) as r:
+        num_vars, n_samples = r.get_variant_ct(), r.get_raw_sample_ct()
+        arr = np.empty((num_vars, n_samples * 2), dtype=np.int32)
+
+    def do_reads(s, e):
+        with pgenlib.PgenReader(file_path) as o:
+            o.read_alleles_range(s, e, arr[s:e])
+
+    start = time.time()
+    chunk = (num_vars + n_threads - 1) // n_threads
+    with concurrent.futures.ThreadPoolExecutor(n_threads) as ex:
+        ex.map(lambda i: do_reads(i * chunk, min((i + 1) * chunk, num_vars)), range(n_threads))
+    return time.time() - start, arr
 
 def main():
     nvariant_limits = np.linspace(7000, 14000, 10, dtype=int)

@@ -4,3 +4,4 @@ pgenlib.c
 pgenlib.cpp
 pgenlib.so
 __pycache__
+temp/

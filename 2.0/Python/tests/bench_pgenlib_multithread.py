@@ -10,6 +10,8 @@ from sklearn.linear_model import LinearRegression
 
 def generate_large_pgen(pgen_dir, case_idx=0, nsample_min=1, nsample_limit=6000, nvariant_min=1, nvariant_limit=10000, allele_ct_max=2):
     pgen_dir = pathlib.Path(pgen_dir)
+    if pgen_dir.exists():
+        return next(pgen_dir.glob("*.pgen"))  # Return existing .pgen file if present
     pgen_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
     # Generate a single large pgen file
     start = time.time()
@@ -44,11 +46,11 @@ def threaded_timed_read(file_path, n_threads=4):
     return time.time() - start, arr
 
 def main():
-    nvariant_limits = np.linspace(7000, 14000, 10, dtype=int)
+    nvariant_limits = np.linspace(7000, 12000, 10, dtype=int)
     single_times = []
     multi_times = []
     for nvariant_limit in nvariant_limits:
-        pgen_dir = f"sample_{nvariant_limit}"
+        pgen_dir = f"temp/sample_{nvariant_limit}"
         pgen_path = generate_large_pgen(pgen_dir, nvariant_min=1, nvariant_limit=nvariant_limit)
         single, single_arr = timed_read(pgen_path)
         multi, multi_arr = threaded_timed_read(pgen_path)
@@ -75,7 +77,7 @@ def main():
     plt.title('Single vs Multi-threaded Read Timings')
     plt.legend()
     plt.tight_layout()
-    plt.savefig('timings_plot.png')
+    plt.savefig('temp/timings_plot.png')
     print(f"Single-threaded OLS slope: {single_slope:.6f} s/variant")
     print(f"Multi-threaded OLS slope:  {multi_slope:.6f} s/variant")
     print("Plot saved as timings_plot.png")

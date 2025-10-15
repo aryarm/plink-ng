@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import time
 import pgenlib
 import pathlib
@@ -8,6 +9,9 @@ import multiprocessing as mpi
 import matplotlib.pyplot as plt
 from test_pgenlib import phased_multiallelic_case
 from sklearn.linear_model import LinearRegression
+
+num_cpus = len(os.sched_getaffinity(os.getpid()))
+print(f"Using {num_cpus} CPUs")
 
 def generate_large_pgen(pgen_dir, case_idx=0, nsample_min=1, nsample_limit=6000, nvariant_min=1, nvariant_limit=10000, allele_ct_max=2):
     pgen_dir = pathlib.Path(pgen_dir)
@@ -30,7 +34,7 @@ def timed_read(file_path):
         elapsed = time.time() - start
     return elapsed, arr
 
-def threaded_timed_read(file_path, n_threads=4):
+def threaded_timed_read(file_path, n_threads=num_cpus):
     file_path = str(file_path).encode()
     with pgenlib.PgenReader(file_path) as r:
         num_vars, n_samples = r.get_variant_ct(), r.get_raw_sample_ct()
@@ -75,7 +79,7 @@ def process_do_reads(s, e):
         arr = np.frombuffer(shd_arr, dtype=np.int32).reshape((num_vars, n_samples * 2))
         o.read_alleles_range(s, e, arr[s:e])
 
-def process_timed_read(file_path, n_threads=4):
+def process_timed_read(file_path, n_threads=num_cpus):
     file_path = str(file_path).encode()
     with pgenlib.PgenReader(file_path) as r:
         num_vars, n_samples = r.get_variant_ct(), r.get_raw_sample_ct()
@@ -96,7 +100,7 @@ def process_timed_read(file_path, n_threads=4):
     return time.time() - start, arr
 
 def main():
-    nvariant_limits = np.linspace(7000, 12000, 10, dtype=int)
+    nvariant_limits = np.linspace(7000, 45222, 9, dtype=int)
     single_times = []
     multi_times = []
     process_times = []
@@ -104,16 +108,26 @@ def main():
     for nvariant_limit in nvariant_limits:
         pgen_dir = f"temp/sample_{nvariant_limit}"
         pgen_path = generate_large_pgen(pgen_dir, nvariant_min=1, nvariant_limit=nvariant_limit)
-        single, single_arr = timed_read(pgen_path)
-        multi, multi_arr = threaded_timed_read(pgen_path)
-        proc, proc_arr = process_timed_read(pgen_path)
 
-        np.testing.assert_allclose(single_arr, multi_arr)
-        np.testing.assert_allclose(single_arr, proc_arr)
+        single_times_rep = []
+        multi_times_rep = []
+        process_times_rep = []
 
-        single_times.append(single)
-        multi_times.append(multi)
-        process_times.append(proc)
+        for rep in range(3):
+            single, single_arr = timed_read(pgen_path)
+            multi, multi_arr = threaded_timed_read(pgen_path)
+            proc, proc_arr = process_timed_read(pgen_path)
+
+            single_times_rep.append(single)
+            multi_times_rep.append(multi)
+            process_times_rep.append(proc)
+
+            np.testing.assert_allclose(single_arr, multi_arr)
+            np.testing.assert_allclose(single_arr, proc_arr)
+
+        single_times.append(np.mean(single_times_rep))
+        multi_times.append(np.mean(multi_times_rep))
+        process_times.append(np.mean(process_times_rep))
 
         print(f"nvariant_limit={nvariant_limit}: single={single:.2f}s, "
               f"multi={multi:.2f}s, process={proc:.2f}s")
@@ -130,8 +144,8 @@ def main():
     for label, (times, model) in models.items():
         slope = model.coef_[0]
         print(f"{label} slope: {slope}")
-        plt.plot(nvariant_limits, times, 'o-', label=f"{label} (slope={slope:.5e})")
-        plt.plot(nvariant_limits, model.predict(X), '--')
+        line, = plt.plot(nvariant_limits, times, 'o-', label=f"{label} (slope={slope:.5e})")
+        plt.plot(nvariant_limits, model.predict(X), '--', color=line.get_color())
     plt.xlabel('nvariant_limit')
     plt.ylabel('Read time (s)')
     plt.title('Single vs Multi-threaded vs Multi-process Read Timings')

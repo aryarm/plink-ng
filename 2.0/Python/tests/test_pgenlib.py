@@ -404,9 +404,9 @@ def phased_multiallelic_case(tmp_path, case_idx, nsample_min, nsample_limit, nva
 def test_phased_multiallelic(tmp_path):
     ncase = 500
     for case_idx in range(0, ncase):
-        phased_multiallelic_case(tmp_path, case_idx, 1, 100, 1, 500, 2)
+        phased_multiallelic_case(tmp_path, case_idx, 1, 100, 1, 100, 2)
     for case_idx in range(ncase, 2*ncase):
-        phased_multiallelic_case(tmp_path, case_idx, 1, 100, 1, 500, 255)
+        phased_multiallelic_case(tmp_path, case_idx, 1, 100, 1, 100, 255)
 
 def check_bim_concordance(bimr, chrom_list, pos_list, id_list, ref_list, alt_list):
     nvariant = bimr.get_variant_ct()

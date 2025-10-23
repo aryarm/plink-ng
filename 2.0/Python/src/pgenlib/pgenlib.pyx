@@ -1142,6 +1142,50 @@ cdef class PgenReader:
         return
 
 
+    cpdef void _validate_2d_int32_for_nogil(self,
+                                               np.ndarray[np.int32_t, mode="c", ndim=2] arr,
+                                               uintptr_t nvariants,
+                                               uintptr_t row_stride):
+        """
+        Validate a C-contiguous 2D int32 ndarray for nogil use
+
+        Preconditions (enforced by typed signature):
+          - arr.dtype == np.int32
+          - arr is C-contiguous (mode="c")
+          - ndim == 2
+
+        Arguments:
+          - arr: the output buffer (np.int32, C-contiguous)
+          - nvariants: number of variant rows you intend to write/read (pass <uintptr_t>variant_idx_ct)
+          - row_stride: number of int32 elements per row that will be used/written
+
+        Raises RuntimeError on validation failure.
+        """
+        cdef uintptr_t rows = <uintptr_t>arr.shape[0]
+        cdef uintptr_t cols = <uintptr_t>arr.shape[1]
+        cdef uintptr_t total_elems
+        cdef uintptr_t needed
+        cdef uintptr_t max_uint = <uintptr_t>(-1)
+
+        # Basic sanity
+        if nvariants > rows:
+            raise RuntimeError("validate_2d_int32_for_nogil(): nvariants > rows of output array")
+        if row_stride > cols:
+            raise RuntimeError("validate_2d_int32_for_nogil(): row_stride > columns of output array")
+
+        # Check overflow for rows * cols
+        if rows != 0 and cols > max_uint // rows:
+            raise RuntimeError("validate_2d_int32_for_nogil(): output array too large (rows * cols would overflow)")
+        total_elems = rows * cols
+
+        # Check overflow for nvariants * row_stride
+        if nvariants != 0 and row_stride > max_uint // nvariants:
+            raise RuntimeError("validate_2d_int32_for_nogil(): requested region size too large (nvariants * row_stride would overflow)")
+        needed = nvariants * row_stride
+        if needed > total_elems:
+            raise RuntimeError("validate_2d_int32_for_nogil(): requested region does not fit in output buffer")
+
+
     cpdef read_alleles_range(self, uint32_t variant_idx_start, uint32_t variant_idx_end, np.ndarray[np.int32_t,mode="c",ndim=2] allele_int32_out, bint hap_maj = 0):
         # if hap_maj == False, allele_int32_out must have at least
         #   variant_idx_ct rows, 2 * sample_ct columns
@@ -1163,14 +1207,20 @@ cdef class PgenReader:
         # Predeclare locals we will need if we run the variant-major loop
         # entirely inside a nogil block. Cython requires cdef declarations
         # to be at function scope (not inside nested blocks).
-        cdef uint32_t row_stride
+        cdef uintptr_t row_stride = <uintptr_t>(2 * subset_size)
         cdef uint32_t vi
-        # Take a base pointer to allele_int32_out while holding the GIL;
-        # inside nogil we will compute offsets relative to this base.
-        cdef int32_t* allele_out_base = <int32_t*>(&(allele_int32_out[0, 0]))
         # Error communication variables
         cdef uint32_t err_vidx = 0
         cdef uint32_t err_flag = 0
+        # keep a Python-level reference to the ndarray so it cannot be freed
+        # while we use the raw pointer inside nogil
+        cdef object _keep = allele_int32_out
+        # Take a base pointer to allele_int32_out while holding the GIL;
+        # inside nogil we will compute offsets relative to this base.
+        cdef int32_t* allele_out_base = <int32_t*>(&(allele_int32_out[0, 0]))
+
+        # Run internal checks for the nogil block below
+        self._prepare_and_validate_2d_int32_for_nogil(allele_int32_out, <uintptr_t>variant_idx_ct, row_stride)
 
         if hap_maj == 0:
             if allele_int32_out.shape[0] < variant_idx_ct:

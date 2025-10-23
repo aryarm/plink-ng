@@ -81,16 +81,16 @@ cdef extern from "../plink2/include/pgenlib_misc.h" namespace "plink2":
     void aligned_free(void* aligned_ptr)
 
     uintptr_t RoundUpPow2(uintptr_t val, uintptr_t alignment)
-    uintptr_t DivUp(uintptr_t val, uintptr_t divisor)
+    uintptr_t DivUp(uintptr_t val, uintptr_t divisor) nogil
     void ZeroTrailingNyps(uintptr_t nyp_ct, uintptr_t* bitarr)
-    void ZeroWArr(uintptr_t entry_ct, uintptr_t* ularr)
+    void ZeroWArr(uintptr_t entry_ct, uintptr_t* ularr) nogil
     # void BitvecAnd(const uintptr_t* arg_bitvec, uintptr_t word_ct, uintptr_t* main_bitvec)
     void FillInterleavedMaskVec(const uintptr_t* subset_mask, uint32_t base_vec_ct, uintptr_t* interleaved_mask_vec)
     void FillCumulativePopcounts(const uintptr_t* subset_mask, uint32_t word_ct, uint32_t* cumulative_popcounts)
 
     ctypedef uintptr_t VecW
-    void TransposeNypblock(const uintptr_t* read_iter, uint32_t read_ul_stride, uint32_t write_ul_stride, uint32_t read_batch_size, uint32_t write_batch_size, uintptr_t* write_iter, VecW* vecaligned_buf)
-    void TransposeBitblock(const uintptr_t* read_iter, uint32_t read_ul_stride, uint32_t write_ul_stride, uint32_t read_batch_size, uint32_t write_batch_size, uintptr_t* write_iter, VecW* vecaligned_buf)
+    void TransposeNypblock(const uintptr_t* read_iter, uint32_t read_ul_stride, uint32_t write_ul_stride, uint32_t read_batch_size, uint32_t write_batch_size, uintptr_t* write_iter, VecW* vecaligned_buf) nogil
+    void TransposeBitblock(const uintptr_t* read_iter, uint32_t read_ul_stride, uint32_t write_ul_stride, uint32_t read_batch_size, uint32_t write_batch_size, uintptr_t* write_iter, VecW* vecaligned_buf) nogil
 
     void GenoarrCountFreqsUnsafe(const uintptr_t* genoarr, uint32_t sample_ct, uint32_t* genocounts)
     void GenovecInvertUnsafe(uint32_t sample_ct, uintptr_t* genovec)
@@ -154,7 +154,7 @@ cdef extern from "../plink2/include/pgenlib_ffi_support.h" namespace "plink2":
     void GenoarrToInt32sMinus9(const uintptr_t* genoarr, uint32_t sample_ct, int32_t* geno_int32)
     void GenoarrToInt64sMinus9(const uintptr_t* genoarr, uint32_t sample_ct, int64_t* geno_int64)
     void GenoarrMPToAlleleCodesMinus9(const PgenVariantStruct* pgv, uint32_t sample_ct, unsigned char* phasebytes, int32_t* allele_codes)
-    void GenoarrPhasedToHapCodes(const uintptr_t* genoarr, const uintptr_t* phaseinfo, uint32_t variant_batch_size, int32_t* hap0_codes_iter, int32_t* hap1_codes_iter)
+    void GenoarrPhasedToHapCodes(const uintptr_t* genoarr, const uintptr_t* phaseinfo, uint32_t variant_batch_size, int32_t* hap0_codes_iter, int32_t* hap1_codes_iter) nogil
     void Dosage16ToFloatsMinus9(const uintptr_t* genoarr, const uintptr_t* dosage_present, const uint16_t* dosage_main, uint32_t sample_ct, uint32_t dosage_ct, float* geno_float)
     void Dosage16ToDoublesMinus9(const uintptr_t* genoarr, const uintptr_t* dosage_present, const uint16_t* dosage_main, uint32_t sample_ct, uint32_t dosage_ct, double* geno_double)
     void BytesToBitsUnsafe(const uint8_t* boolbytes, uint32_t sample_ct, uintptr_t* bitarr)
@@ -1165,9 +1165,9 @@ cdef class PgenReader:
                 raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few rows (" + str(allele_int32_out.shape[0]) + "; (variant_idx_end - variant_idx_start) is " + str(variant_idx_ct) + ")")
             if allele_int32_out.shape[1] < 2 * subset_size:
                 raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ", and column count should be twice that)")
+            # TODO: add a nogil statement here
             for variant_idx in range(variant_idx_start, variant_idx_end):
-                with nogil:
-                    reterr = PgrGetMP(subset_include_vec, subset_index, subset_size, variant_idx, pgrp, &self._pgv)
+                reterr = PgrGetMP(subset_include_vec, subset_index, subset_size, variant_idx, pgrp, &self._pgv)
                 if reterr != kPglRetSuccess:
                     raise RuntimeError("variant_idx " + str(variant_idx) + " read_alleles_range() error " + str(reterr))
                 main_data_ptr = <int32_t*>(&(allele_int32_out[(variant_idx - variant_idx_start), 0]))
@@ -1195,6 +1195,16 @@ cdef class PgenReader:
         cdef uintptr_t* multivar_vmaj_phaseinfo_buf = self._multivar_vmaj_phaseinfo_buf
         cdef uintptr_t* multivar_smaj_geno_batch_buf = self._multivar_smaj_geno_batch_buf
         cdef uintptr_t* multivar_smaj_phaseinfo_batch_buf = self._multivar_smaj_phaseinfo_batch_buf
+
+        # Take a base pointer to allele_int32_out while holding the GIL;
+        # inside nogil we will compute offsets relative to this base.
+        cdef int32_t* allele_out_base = <int32_t*>(&(allele_int32_out[0, 0]))
+
+        # Error communication variables (written inside nogil; checked after).
+        cdef PglErr nogil_reterr = kPglRetSuccess
+        cdef uint32_t err_vidx = 0
+        cdef uint32_t err_flag = 0
+
         cdef uintptr_t* vmaj_geno_iter
         cdef uintptr_t* vmaj_phaseinfo_iter
         cdef uintptr_t* smaj_geno_iter
@@ -1205,45 +1215,57 @@ cdef class PgenReader:
         cdef uint32_t sample_batch_idx
         cdef uint32_t phasepresent_ct
         cdef uint32_t uii
-        for variant_batch_idx in range(variant_batch_ct):
-            if variant_batch_idx == (variant_batch_ct - 1):
-                variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
-                variant_batch_sizel = DivUp(variant_batch_size, kBitsPerWord)
-            vmaj_geno_iter = multivar_vmaj_geno_buf
-            vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
-            for uii in range(variant_batch_size):
-                with nogil:
-                    reterr = PgrGetP(subset_include_vec, subset_index, subset_size, uii + variant_idx_offset, pgrp, vmaj_geno_iter, phasepresent, vmaj_phaseinfo_iter, &phasepresent_ct)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("variant_idx " + str(uii + variant_idx_offset) + " read_alleles_range() error " + str(reterr))
-                if phasepresent_ct == 0:
-                    ZeroWArr(sample_ctaw, vmaj_phaseinfo_iter)
-                # else:
-                    # BitvecAnd(phasepresent, sample_ctaw, vmaj_phaseinfo_iter)
-                vmaj_geno_iter = &(vmaj_geno_iter[sample_ctaw2])
-                vmaj_phaseinfo_iter = &(vmaj_phaseinfo_iter[sample_ctaw])
-            sample_batch_size = kPglNypTransposeBatch
-            vmaj_geno_iter = multivar_vmaj_geno_buf
-            vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
-            for sample_batch_idx in range(sample_batch_ct):
-                if sample_batch_idx == sample_batch_ct - 1:
-                    sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
-                smaj_geno_iter = multivar_smaj_geno_batch_buf
-                smaj_phaseinfo_iter = multivar_smaj_phaseinfo_batch_buf
-                TransposeNypblock(vmaj_geno_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_geno_iter, transpose_batch_buf)
-                # todo: skip bitblock transpose when all phasepresent_ct values
-                #       are zero, etc.
-                TransposeBitblock(vmaj_phaseinfo_iter, sample_ctaw, <uint32_t>(kPglNypTransposeWords // 2), variant_batch_size, sample_batch_size, smaj_phaseinfo_iter, transpose_batch_buf)
-                for uii in range(sample_batch_size):
-                    # bugfix (11 Mar 2023): first index was incorrect
-                    main_data_ptr = <int32_t*>(&(allele_int32_out[2 * (uii + sample_batch_idx * kPglNypTransposeBatch), variant_batch_idx * kPglNypTransposeBatch]))
-                    main_data1_ptr = <int32_t*>(&(allele_int32_out[2 * (uii + sample_batch_idx * kPglNypTransposeBatch) + 1, variant_batch_idx * kPglNypTransposeBatch]))
-                    GenoarrPhasedToHapCodes(smaj_geno_iter, smaj_phaseinfo_iter, variant_batch_size, main_data_ptr, main_data1_ptr)
-                    smaj_geno_iter = &(smaj_geno_iter[kPglNypTransposeWords])
-                    smaj_phaseinfo_iter = &(smaj_phaseinfo_iter[kPglNypTransposeWords // 2])
-                vmaj_geno_iter = &(vmaj_geno_iter[kPglNypTransposeWords])
-                vmaj_phaseinfo_iter = &(vmaj_phaseinfo_iter[kPglNypTransposeWords // 2])
-            variant_idx_offset += kPglNypTransposeBatch
+
+        # heavier nested loops and C calls -> run without GIL
+        with nogil:
+            for variant_batch_idx in range(variant_batch_ct):
+                if variant_batch_idx == (variant_batch_ct - 1):
+                    variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
+                    variant_batch_sizel = DivUp(variant_batch_size, kBitsPerWord)
+                vmaj_geno_iter = multivar_vmaj_geno_buf
+                vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
+                for uii in range(variant_batch_size):
+                    nogil_reterr = PgrGetP(subset_include_vec, subset_index, subset_size, uii + variant_idx_offset, pgrp, vmaj_geno_iter, phasepresent, vmaj_phaseinfo_iter, &phasepresent_ct)
+                    if nogil_reterr != kPglRetSuccess:
+                        err_flag = 1
+                        err_vidx = uii + variant_idx_offset
+                        break
+                    if phasepresent_ct == 0:
+                        ZeroWArr(sample_ctaw, vmaj_phaseinfo_iter)
+                    # else:
+                        # BitvecAnd(phasepresent, sample_ctaw, vmaj_phaseinfo_iter)
+                    vmaj_geno_iter = &(vmaj_geno_iter[sample_ctaw2])
+                    vmaj_phaseinfo_iter = &(vmaj_phaseinfo_iter[sample_ctaw])
+                if err_flag:
+                    break
+
+                sample_batch_size = kPglNypTransposeBatch
+                vmaj_geno_iter = multivar_vmaj_geno_buf
+                vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
+                for sample_batch_idx in range(sample_batch_ct):
+                    if sample_batch_idx == sample_batch_ct - 1:
+                        sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
+                    smaj_geno_iter = multivar_smaj_geno_batch_buf
+                    smaj_phaseinfo_iter = multivar_smaj_phaseinfo_batch_buf
+                    TransposeNypblock(vmaj_geno_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_geno_iter, transpose_batch_buf)
+                    # todo: skip bitblock transpose when all phasepresent_ct values
+                    #       are zero, etc.
+                    TransposeBitblock(vmaj_phaseinfo_iter, sample_ctaw, <uint32_t>(kPglNypTransposeWords // 2), variant_batch_size, sample_batch_size, smaj_phaseinfo_iter, transpose_batch_buf)
+                    for uii in range(sample_batch_size):
+                        # compute pointer to allele_int32_out[2*sample_row, col_start]
+                        # row_stride == variant_idx_ct (number of columns)
+                        main_data_ptr = allele_out_base + (2 * (uii + sample_batch_idx * kPglNypTransposeBatch)) * variant_idx_ct + (variant_batch_idx * kPglNypTransposeBatch)
+                        main_data1_ptr = main_data_ptr + variant_idx_ct
+                        GenoarrPhasedToHapCodes(smaj_geno_iter, smaj_phaseinfo_iter, variant_batch_size, main_data_ptr, main_data1_ptr)
+                        smaj_geno_iter = &(smaj_geno_iter[kPglNypTransposeWords])
+                        smaj_phaseinfo_iter = &(smaj_phaseinfo_iter[kPglNypTransposeWords // 2])
+                    vmaj_geno_iter = &(vmaj_geno_iter[kPglNypTransposeWords])
+                    vmaj_phaseinfo_iter = &(vmaj_phaseinfo_iter[kPglNypTransposeWords // 2])
+                variant_idx_offset += kPglNypTransposeBatch
+
+        # Back in GIL: if an error happened inside nogil, raise an exception.
+        if err_flag:
+            raise RuntimeError("variant_idx " + str(err_vidx) + " read_alleles_range() error " + str(nogil_reterr))
         return
 
 

@@ -153,7 +153,7 @@ cdef extern from "../plink2/include/pgenlib_ffi_support.h" namespace "plink2":
     void GenoarrToBytesMinus9(const uintptr_t* genoarr, uint32_t sample_ct, int8_t* genobytes)
     void GenoarrToInt32sMinus9(const uintptr_t* genoarr, uint32_t sample_ct, int32_t* geno_int32)
     void GenoarrToInt64sMinus9(const uintptr_t* genoarr, uint32_t sample_ct, int64_t* geno_int64)
-    void GenoarrMPToAlleleCodesMinus9(const PgenVariantStruct* pgv, uint32_t sample_ct, unsigned char* phasebytes, int32_t* allele_codes)
+    void GenoarrMPToAlleleCodesMinus9(const PgenVariantStruct* pgv, uint32_t sample_ct, unsigned char* phasebytes, int32_t* allele_codes) nogil
     void GenoarrPhasedToHapCodes(const uintptr_t* genoarr, const uintptr_t* phaseinfo, uint32_t variant_batch_size, int32_t* hap0_codes_iter, int32_t* hap1_codes_iter) nogil
     void Dosage16ToFloatsMinus9(const uintptr_t* genoarr, const uintptr_t* dosage_present, const uint16_t* dosage_main, uint32_t sample_ct, uint32_t dosage_ct, float* geno_float)
     void Dosage16ToDoublesMinus9(const uintptr_t* genoarr, const uintptr_t* dosage_present, const uint16_t* dosage_main, uint32_t sample_ct, uint32_t dosage_ct, double* geno_double)
@@ -1159,19 +1159,36 @@ cdef class PgenReader:
         cdef uint32_t subset_size = self._subset_size
         cdef int32_t* main_data_ptr
         cdef uint32_t variant_idx
-        cdef PglErr reterr
+        cdef PglErr reterr = kPglRetSuccess
+        # Predeclare locals we will need if we run the variant-major loop
+        # entirely inside a nogil block. Cython requires cdef declarations
+        # to be at function scope (not inside nested blocks).
+        cdef uint32_t row_stride
+        cdef uint32_t vi
+        # Take a base pointer to allele_int32_out while holding the GIL;
+        # inside nogil we will compute offsets relative to this base.
+        cdef int32_t* allele_out_base = <int32_t*>(&(allele_int32_out[0, 0]))
+        # Error communication variables
+        cdef uint32_t err_vidx = 0
+        cdef uint32_t err_flag = 0
+
         if hap_maj == 0:
             if allele_int32_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few rows (" + str(allele_int32_out.shape[0]) + "; (variant_idx_end - variant_idx_start) is " + str(variant_idx_ct) + ")")
             if allele_int32_out.shape[1] < 2 * subset_size:
-                raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ", and column count should be twice that)")
-            # TODO: add a nogil statement here
-            for variant_idx in range(variant_idx_start, variant_idx_end):
-                reterr = PgrGetMP(subset_include_vec, subset_index, subset_size, variant_idx, pgrp, &self._pgv)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("variant_idx " + str(variant_idx) + " read_alleles_range() error " + str(reterr))
-                main_data_ptr = <int32_t*>(&(allele_int32_out[(variant_idx - variant_idx_start), 0]))
-                GenoarrMPToAlleleCodesMinus9(&self._pgv, subset_size, NULL, main_data_ptr)
+                raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ").")
+            row_stride = 2 * subset_size  # number of int32 elements per variant row
+            with nogil:
+                for vi in range(variant_idx_ct):
+                    variant_idx = variant_idx_start + vi
+                    reterr = PgrGetMP(subset_include_vec, subset_index, subset_size, variant_idx, pgrp, &self._pgv)
+                    if reterr != kPglRetSuccess:
+                        err_flag = 1
+                        break
+                    main_data_ptr = allele_out_base + vi * row_stride
+                    GenoarrMPToAlleleCodesMinus9(&self._pgv, subset_size, NULL, main_data_ptr)
+            if err_flag:
+                raise RuntimeError("variant_idx " + str(variant_idx) + " read_alleles_range() error " + str(reterr))
             return
         if variant_idx_start >= variant_idx_end:
             raise RuntimeError("read_alleles_range() variant_idx_start >= variant_idx_end (" + str(variant_idx_start) + ", " + str(variant_idx_end) + ")")
@@ -1196,15 +1213,6 @@ cdef class PgenReader:
         cdef uintptr_t* multivar_smaj_geno_batch_buf = self._multivar_smaj_geno_batch_buf
         cdef uintptr_t* multivar_smaj_phaseinfo_batch_buf = self._multivar_smaj_phaseinfo_batch_buf
 
-        # Take a base pointer to allele_int32_out while holding the GIL;
-        # inside nogil we will compute offsets relative to this base.
-        cdef int32_t* allele_out_base = <int32_t*>(&(allele_int32_out[0, 0]))
-
-        # Error communication variables (written inside nogil; checked after).
-        cdef PglErr nogil_reterr = kPglRetSuccess
-        cdef uint32_t err_vidx = 0
-        cdef uint32_t err_flag = 0
-
         cdef uintptr_t* vmaj_geno_iter
         cdef uintptr_t* vmaj_phaseinfo_iter
         cdef uintptr_t* smaj_geno_iter
@@ -1225,8 +1233,8 @@ cdef class PgenReader:
                 vmaj_geno_iter = multivar_vmaj_geno_buf
                 vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
                 for uii in range(variant_batch_size):
-                    nogil_reterr = PgrGetP(subset_include_vec, subset_index, subset_size, uii + variant_idx_offset, pgrp, vmaj_geno_iter, phasepresent, vmaj_phaseinfo_iter, &phasepresent_ct)
-                    if nogil_reterr != kPglRetSuccess:
+                    reterr = PgrGetP(subset_include_vec, subset_index, subset_size, uii + variant_idx_offset, pgrp, vmaj_geno_iter, phasepresent, vmaj_phaseinfo_iter, &phasepresent_ct)
+                    if reterr != kPglRetSuccess:
                         err_flag = 1
                         err_vidx = uii + variant_idx_offset
                         break
@@ -1265,7 +1273,7 @@ cdef class PgenReader:
 
         # Back in GIL: if an error happened inside nogil, raise an exception.
         if err_flag:
-            raise RuntimeError("variant_idx " + str(err_vidx) + " read_alleles_range() error " + str(nogil_reterr))
+            raise RuntimeError("variant_idx " + str(err_vidx) + " read_alleles_range() error " + str(reterr))
         return
 
 

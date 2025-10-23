@@ -86,6 +86,7 @@ def process_do_reads(s, e):
         o.read_alleles_range(s, e, arr[s:e])
 
 def process_timed_read(file_path, n_threads=num_cpus, single_arr=None):
+    return 0
     file_path = str(file_path).encode()
     with pgenlib.PgenReader(file_path) as r:
         num_vars, n_samples = r.get_variant_ct(), r.get_raw_sample_ct()
@@ -120,14 +121,15 @@ def bench_instance(pgen_path: pathlib.Path):
     return single, thread, proc
 
 def main():
-    nvariant_limits = np.linspace(2000, 80000, 10, dtype=int)
+    nsample_fixed = 200000
+    nvariant_limits = np.linspace(5, 118, 10, dtype=int)
     single_times = []
     thread_times = []
     process_times = []
 
     for nvariant_limit in nvariant_limits:
         pgen_dir = f"temp/sample_{nvariant_limit}"
-        pgen_path = generate_large_pgen(pgen_dir, nvariant_limit=nvariant_limit)
+        pgen_path = generate_large_pgen(pgen_dir, nvariant_limit=nvariant_limit, nsample_limit=nsample_fixed)
 
         single_times_rep = []
         thread_times_rep = []
@@ -158,12 +160,14 @@ def main():
     plt.figure(figsize=(8,6))
     for label, (times, model) in models.items():
         slope = model.coef_[0]
+        if slope == 0:
+            continue
         print(f"{label} slope: {slope}")
         line, = plt.plot(nvariant_limits, times, 'o-', label=f"{label} (slope={slope:.5e})")
         plt.plot(nvariant_limits, model.predict(X), '--', color=line.get_color())
-    plt.xlabel('Number of variants\nNumber of samples fixed at 20000')
+    plt.xlabel(f"Number of variants\nNumber of samples fixed at {nsample_fixed}")
     plt.ylabel('Read time (s)')
-    plt.title('Single vs Multi-threaded vs Multi-process Read Timings')
+    plt.title('PgenReader Timings')
     plt.legend()
     plt.tight_layout()
     plt.savefig('temp/timings_plot.png')

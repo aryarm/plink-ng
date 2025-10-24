@@ -110,13 +110,9 @@ def process_timed_read(file_path, n_threads=num_cpus, single_arr=None):
     return elapsed
 
 def bench_instance(pgen_path: pathlib.Path):
-    # single, single_arr = timed_read(pgen_path)
-    # thread = threaded_timed_read(pgen_path, single_arr=single_arr)
-    # proc = process_timed_read(pgen_path, single_arr=single_arr)
-
-    single = timed_read(pgen_path, return_arr=False)
-    thread = threaded_timed_read(pgen_path)
-    proc = process_timed_read(pgen_path)
+    single, single_arr = timed_read(pgen_path)
+    thread = threaded_timed_read(pgen_path, single_arr=single_arr)
+    proc = process_timed_read(pgen_path, single_arr=single_arr)
 
     return single, thread, proc
 
@@ -144,9 +140,9 @@ def main():
 
         print(
             f"nvariant_limit={nvariant_limit}: "
-            f"single={single_times_rep:.2f}s, "
-            f"thread={thread_times_rep:.2f}s, "
-            f"process={process_times_rep:.2f}s"
+            f"single={single_times_rep:.3f}s, "
+            f"thread={thread_times_rep:.3f}s, "
+            f"process={process_times_rep:.3f}s"
         )
 
     # Fit OLS models

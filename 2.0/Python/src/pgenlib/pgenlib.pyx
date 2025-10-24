@@ -1220,7 +1220,7 @@ cdef class PgenReader:
         cdef int32_t* allele_out_base = <int32_t*>(&(allele_int32_out[0, 0]))
 
         # Run internal checks for the nogil block below
-        self._prepare_and_validate_2d_int32_for_nogil(allele_int32_out, <uintptr_t>variant_idx_ct, row_stride)
+        self._validate_2d_int32_for_nogil(allele_int32_out, <uintptr_t>variant_idx_ct, row_stride)
 
         if hap_maj == 0:
             if allele_int32_out.shape[0] < variant_idx_ct:

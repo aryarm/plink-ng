@@ -1203,7 +1203,7 @@ cdef class PgenReader:
         cdef uint32_t subset_size = self._subset_size
         cdef int32_t* main_data_ptr
         cdef uint32_t variant_idx
-        cdef PglErr reterr = kPglRetSuccess
+        cdef PglErr reterr
         cdef uint32_t vi
         cdef uintptr_t row_stride = <uintptr_t>(2 * subset_size)
         cdef uint32_t err_flag = 0
@@ -1218,7 +1218,7 @@ cdef class PgenReader:
             if allele_int32_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few rows (" + str(allele_int32_out.shape[0]) + "; (variant_idx_end - variant_idx_start) is " + str(variant_idx_ct) + ")")
             if allele_int32_out.shape[1] < 2 * subset_size:
-                raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + "), and column count should be twice that)")
+                raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ", and column count should be twice that)")
             with nogil:
                 for vi in range(variant_idx_ct):
                     variant_idx = variant_idx_start + vi

@@ -1204,17 +1204,9 @@ cdef class PgenReader:
         cdef int32_t* main_data_ptr
         cdef uint32_t variant_idx
         cdef PglErr reterr = kPglRetSuccess
-        # Predeclare locals we will need if we run the variant-major loop
-        # entirely inside a nogil block. Cython requires cdef declarations
-        # to be at function scope (not inside nested blocks).
-        cdef uintptr_t row_stride = <uintptr_t>(2 * subset_size)
         cdef uint32_t vi
-        # Error communication variables
-        cdef uint32_t err_vidx = 0
+        cdef uintptr_t row_stride = <uintptr_t>(2 * subset_size)
         cdef uint32_t err_flag = 0
-        # keep a Python-level reference to the ndarray so it cannot be freed
-        # while we use the raw pointer inside nogil
-        cdef object _keep = allele_int32_out
         # Take a base pointer to allele_int32_out while holding the GIL;
         # inside nogil we will compute offsets relative to this base.
         cdef int32_t* allele_out_base = <int32_t*>(&(allele_int32_out[0, 0]))
@@ -1226,8 +1218,7 @@ cdef class PgenReader:
             if allele_int32_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few rows (" + str(allele_int32_out.shape[0]) + "; (variant_idx_end - variant_idx_start) is " + str(variant_idx_ct) + ")")
             if allele_int32_out.shape[1] < 2 * subset_size:
-                raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ").")
-            row_stride = 2 * subset_size  # number of int32 elements per variant row
+                raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + "), and column count should be twice that)")
             with nogil:
                 for vi in range(variant_idx_ct):
                     variant_idx = variant_idx_start + vi
@@ -1262,7 +1253,6 @@ cdef class PgenReader:
         cdef uintptr_t* multivar_vmaj_phaseinfo_buf = self._multivar_vmaj_phaseinfo_buf
         cdef uintptr_t* multivar_smaj_geno_batch_buf = self._multivar_smaj_geno_batch_buf
         cdef uintptr_t* multivar_smaj_phaseinfo_batch_buf = self._multivar_smaj_phaseinfo_batch_buf
-
         cdef uintptr_t* vmaj_geno_iter
         cdef uintptr_t* vmaj_phaseinfo_iter
         cdef uintptr_t* smaj_geno_iter
@@ -1273,8 +1263,6 @@ cdef class PgenReader:
         cdef uint32_t sample_batch_idx
         cdef uint32_t phasepresent_ct
         cdef uint32_t uii
-
-        # heavier nested loops and C calls -> run without GIL
         with nogil:
             for variant_batch_idx in range(variant_batch_ct):
                 if variant_batch_idx == (variant_batch_ct - 1):
@@ -1283,10 +1271,10 @@ cdef class PgenReader:
                 vmaj_geno_iter = multivar_vmaj_geno_buf
                 vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
                 for uii in range(variant_batch_size):
-                    reterr = PgrGetP(subset_include_vec, subset_index, subset_size, uii + variant_idx_offset, pgrp, vmaj_geno_iter, phasepresent, vmaj_phaseinfo_iter, &phasepresent_ct)
+                    variant_idx = uii + variant_idx_offset
+                    reterr = PgrGetP(subset_include_vec, subset_index, subset_size, variant_idx, pgrp, vmaj_geno_iter, phasepresent, vmaj_phaseinfo_iter, &phasepresent_ct)
                     if reterr != kPglRetSuccess:
                         err_flag = 1
-                        err_vidx = uii + variant_idx_offset
                         break
                     if phasepresent_ct == 0:
                         ZeroWArr(sample_ctaw, vmaj_phaseinfo_iter)
@@ -1296,7 +1284,6 @@ cdef class PgenReader:
                     vmaj_phaseinfo_iter = &(vmaj_phaseinfo_iter[sample_ctaw])
                 if err_flag:
                     break
-
                 sample_batch_size = kPglNypTransposeBatch
                 vmaj_geno_iter = multivar_vmaj_geno_buf
                 vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
@@ -1320,10 +1307,8 @@ cdef class PgenReader:
                     vmaj_geno_iter = &(vmaj_geno_iter[kPglNypTransposeWords])
                     vmaj_phaseinfo_iter = &(vmaj_phaseinfo_iter[kPglNypTransposeWords // 2])
                 variant_idx_offset += kPglNypTransposeBatch
-
-        # Back in GIL: if an error happened inside nogil, raise an exception.
         if err_flag:
-            raise RuntimeError("variant_idx " + str(err_vidx) + " read_alleles_range() error " + str(reterr))
+            raise RuntimeError("variant_idx " + str(variant_idx) + " read_alleles_range() error " + str(reterr))
         return
 
 

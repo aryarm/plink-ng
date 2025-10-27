@@ -183,13 +183,6 @@ def main(tmp_path, also_plot: bool = True):
         "Multi-process": (np.mean(process_times, axis=1), ols_fit_1d(X, process_times, reps=num_reps)),
     }
 
-    # check that multi-threaded is faster than both single-threaded and multi-processing
-    # by comparing the slopes of the lines
-    for model in ("Single-threaded", "Multi-process"):
-        slope = models[model][1][1]
-        if not np.isnan(slope):
-            assert slope > models["Multi-threaded"][1][1]
-
     if also_plot:
         import matplotlib.pyplot as plt
         plt.figure(figsize=(8, 6))
@@ -210,6 +203,13 @@ def main(tmp_path, also_plot: bool = True):
         output_file_path = str(tmp_path / 'timings_plot.png')
         plt.savefig(output_file_path)
         print(f"Plot saved as {output_file_path}", file=sys.stderr)
+
+    # check that multi-threaded is faster than both single-threaded and multi-processing
+    # by comparing the slopes of the lines
+    for model in ("Single-threaded", "Multi-process"):
+        slope = models[model][1][1]
+        if not np.isnan(slope):
+            assert slope > models["Multi-threaded"][1][1]
 
 def test_multithread(tmp_path):
     main(tmp_path, also_plot=False)

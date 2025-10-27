@@ -9,7 +9,11 @@ import concurrent.futures
 import multiprocessing as mpi
 from test_pgenlib import unphased_biallelic_case
 
-num_cpus = len(os.sched_getaffinity(os.getpid()))
+try:
+    num_cpus = len(os.sched_getaffinity(os.getpid()))
+except AttributeError:
+    # if on macos, fallback to number of CPUs given by os.cpu_count()
+    num_cpus = mpi.cpu_count()
 print(f"Using {num_cpus} CPUs", file=sys.stderr)
 
 def generate_large_pgen(pgen_dir, case_idx=0, nsample_min=1, nsample_limit=20000, nvariant_min=1, nvariant_limit=80000):

@@ -1142,48 +1142,76 @@ cdef class PgenReader:
         return
 
 
-    cpdef void _validate_2d_int32_for_nogil(self,
-                                               np.ndarray[np.int32_t, mode="c", ndim=2] arr,
-                                               uintptr_t nvariants,
-                                               uintptr_t row_stride):
+    cdef void validate_2d_for_nogil(self, object arr, uintptr_t nvariants, uintptr_t row_stride, void** out_base, size_t expected_itemsize = 0):
         """
-        Validate a C-contiguous 2D int32 ndarray for nogil use
+        Generic validator for C-contiguous 2-D numpy arrays prior to using a
+        raw pointer under nogil.
 
-        Preconditions (enforced by typed signature):
-          - arr.dtype == np.int32
-          - arr is C-contiguous (mode="c")
-          - ndim == 2
+        - arr: any Python object; must be a numpy.ndarray (checked at runtime).
+        - nvariants: number of variant rows you intend to write/read (in elements).
+        - row_stride: number of elements per row that will be used/written.
+        - out_base: out-parameter; on success out_base[0] will be a void* pointing
+          at the array data (equivalent to &arr[0,0]).
+        - expected_itemsize: if nonzero, validate that arr.itemsize == expected_itemsize.
 
-        Arguments:
-          - arr: the output buffer (np.int32, C-contiguous)
-          - nvariants: number of variant rows you intend to write/read (pass <uintptr_t>variant_idx_ct)
-          - row_stride: number of int32 elements per row that will be used/written
+        Raises RuntimeError on any validation failure.
 
-        Raises RuntimeError on validation failure.
+        Important:
+        - row_stride is in element units (not bytes).
         """
-        cdef uintptr_t rows = <uintptr_t>arr.shape[0]
-        cdef uintptr_t cols = <uintptr_t>arr.shape[1]
+        cdef np.ndarray parr
+        cdef uintptr_t rows, cols
         cdef uintptr_t total_elems
         cdef uintptr_t needed
         cdef uintptr_t max_uint = <uintptr_t>(-1)
+        cdef void* data_ptr
+        cdef size_t itemsize
 
-        # Basic sanity
+        # Ensure it's an ndarray (do NOT coerce to ndarray via asarray; we
+        # require the caller to pass an ndarray to avoid temporary copies).
+        if not isinstance(arr, np.ndarray):
+            raise RuntimeError("validate_2d_for_nogil(): arr must be a numpy.ndarray")
+
+        # Cast to typed np.ndarray object to access shape/flags safely
+        parr = <np.ndarray>arr
+
+        # Basic 2-D check and contiguity
+        if parr.ndim != 2:
+            raise RuntimeError("validate_2d_for_nogil(): arr must be 2-dimensional")
+        if not parr.flags['C_CONTIGUOUS']:
+            raise RuntimeError("validate_2d_for_nogil(): arr must be C-contiguous")
+
+        # Optionally check itemsize if caller provided an expectation
+        itemsize = <size_t>parr.itemsize
+        if expected_itemsize != 0 and itemsize != expected_itemsize:
+            raise RuntimeError("validate_2d_for_nogil(): arr.itemsize != expected_itemsize")
+
+        # Shapes as uintptr_t for overflow-safe arithmetic
+        rows = <uintptr_t>parr.shape[0]
+        cols = <uintptr_t>parr.shape[1]
+
+        # Basic sanity checks against caller-supplied parameters
         if nvariants > rows:
-            raise RuntimeError("validate_2d_int32_for_nogil(): nvariants > rows of output array")
+            raise RuntimeError("validate_2d_for_nogil(): nvariants > rows of output array")
         if row_stride > cols:
-            raise RuntimeError("validate_2d_int32_for_nogil(): row_stride > columns of output array")
+            raise RuntimeError("validate_2d_for_nogil(): row_stride > columns of output array")
 
         # Check overflow for rows * cols
         if rows != 0 and cols > max_uint // rows:
-            raise RuntimeError("validate_2d_int32_for_nogil(): output array too large (rows * cols would overflow)")
+            raise RuntimeError("validate_2d_for_nogil(): output array too large (rows * cols would overflow)")
         total_elems = rows * cols
 
         # Check overflow for nvariants * row_stride
         if nvariants != 0 and row_stride > max_uint // nvariants:
-            raise RuntimeError("validate_2d_int32_for_nogil(): requested region size too large (nvariants * row_stride would overflow)")
+            raise RuntimeError("validate_2d_for_nogil(): requested region size too large (nvariants * row_stride would overflow)")
         needed = nvariants * row_stride
         if needed > total_elems:
-            raise RuntimeError("validate_2d_int32_for_nogil(): requested region does not fit in output buffer")
+            raise RuntimeError("validate_2d_for_nogil(): requested region does not fit in output buffer")
+
+        # Obtain raw data pointer (void*) using NumPy C API
+        data_ptr = <void*> np.PyArray_DATA(parr)
+        out_base[0] = data_ptr
+        return
 
 
     cpdef read_alleles_range(self, uint32_t variant_idx_start, uint32_t variant_idx_end, np.ndarray[np.int32_t,mode="c",ndim=2] allele_int32_out, bint hap_maj = 0):
@@ -1207,12 +1235,12 @@ cdef class PgenReader:
         cdef uint32_t vi
         cdef uintptr_t row_stride = <uintptr_t>(2 * subset_size)
         cdef uint32_t err_flag = 0
-        # Take a base pointer to allele_int32_out while holding the GIL;
-        # inside nogil we will compute offsets relative to this base.
-        cdef int32_t* allele_out_base = <int32_t*>(&(allele_int32_out[0, 0]))
+        # A base pointer to allele_int32_out;
+        # Inside nogil we will compute offsets relative to this base
+        cdef int32_t* allele_out_base
 
         # Run internal checks for the nogil block below
-        self._validate_2d_int32_for_nogil(allele_int32_out, <uintptr_t>variant_idx_ct, row_stride)
+        self.validate_2d_for_nogil(allele_int32_out, <uintptr_t>variant_idx_ct, row_stride, <void**>&allele_out_base, <size_t>sizeof(int32_t))
 
         if hap_maj == 0:
             if allele_int32_out.shape[0] < variant_idx_ct:

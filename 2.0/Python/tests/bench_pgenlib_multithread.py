@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 import os
+import sys
 import time
 import pgenlib
-import pathlib
 import numpy as np
+from pathlib import Path
 import concurrent.futures
 import multiprocessing as mpi
-import matplotlib.pyplot as plt
 from test_pgenlib import unphased_biallelic_case
-from sklearn.linear_model import LinearRegression
 
 num_cpus = len(os.sched_getaffinity(os.getpid()))
-print(f"Using {num_cpus} CPUs")
+print(f"Using {num_cpus} CPUs", file=sys.stderr)
 
 def generate_large_pgen(pgen_dir, case_idx=0, nsample_min=1, nsample_limit=20000, nvariant_min=1, nvariant_limit=80000):
-    pgen_dir = pathlib.Path(pgen_dir)
+    pgen_dir = Path(pgen_dir)
     if pgen_dir.exists():
         return next(pgen_dir.glob("*.pgen"))  # Return existing .pgen file if present
     pgen_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
     # Generate a single large pgen file
     start = time.time()
     unphased_biallelic_case(pgen_dir, case_idx, nsample_min, nsample_limit, nvariant_min, nvariant_limit)
-    print(f"Time to generate PGEN: {time.time() - start:.2f}s")
+    print(f"Time to generate PGEN: {time.time() - start:.2f}s", file=sys.stderr)
     # Return the expected .pgen file path
     return next(pgen_dir.glob("*.pgen"))
 
@@ -86,7 +85,7 @@ def process_do_reads(s, e):
         o.read_alleles_range(s, e, arr[s:e])
 
 def process_timed_read(file_path, n_threads=num_cpus, single_arr=None):
-    return 0
+    return np.inf # comment this out to enable multi-process testing
     file_path = str(file_path).encode()
     with pgenlib.PgenReader(file_path) as r:
         num_vars, n_samples = r.get_variant_ct(), r.get_raw_sample_ct()
@@ -109,65 +108,111 @@ def process_timed_read(file_path, n_threads=num_cpus, single_arr=None):
         np.testing.assert_allclose(single_arr, arr)
     return elapsed
 
-def bench_instance(pgen_path: pathlib.Path):
+def bench_instance(pgen_path: Path):
     single, single_arr = timed_read(pgen_path)
     thread = threaded_timed_read(pgen_path, single_arr=single_arr)
     proc = process_timed_read(pgen_path, single_arr=single_arr)
 
     return single, thread, proc
 
-def main():
+def ols_fit_1d(x: np.ndarray, y: np.ndarray, reps: int = 1):
+    """
+    Fit y = intercept + slope * x by ordinary least squares using numpy.
+    Returns (intercept, slope).
+    """
+    x = np.repeat(np.asarray(x, dtype=float).ravel(), reps)
+    y = np.asarray(y, dtype=float).ravel()
+    if x.size != y.size:
+        raise ValueError("x and y must have the same length")
+    # Design matrix [1, x]
+    A = np.vstack([np.ones_like(x), x]).T
+    coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+    intercept, slope = coef[0], coef[1]
+    return float(intercept), float(slope)
+
+def main(tmp_path, also_plot: bool = True):
     nsample_fixed = 200000
-    nvariant_limits = np.linspace(5, 118, 10, dtype=int)
+    nvariant_limits = np.linspace(5, 118, 5, dtype=int)
+    num_reps = 5
     single_times = []
     thread_times = []
     process_times = []
 
     for nvariant_limit in nvariant_limits:
-        pgen_dir = f"temp/sample_{nvariant_limit}"
+        pgen_dir = tmp_path / f"sample_{nvariant_limit}"
+        # generate_large_pgen is assumed to return a path to the generated pgen file
         pgen_path = generate_large_pgen(pgen_dir, nvariant_limit=nvariant_limit, nsample_limit=nsample_fixed)
 
         single_times_rep = []
         thread_times_rep = []
         process_times_rep = []
 
-        for rep in range(5):
-            single_times_rep, thread_times_rep, process_times_rep = bench_instance(pgen_path)
+        # collect several repetitions properly (previous code overwrote lists)
+        for rep in range(num_reps):
+            s_time, t_time, p_time = bench_instance(pgen_path)
+            single_times_rep.append(s_time)
+            thread_times_rep.append(t_time)
+            process_times_rep.append(p_time)
 
-        single_times.append(np.mean(single_times_rep))
-        thread_times.append(np.mean(thread_times_rep))
-        process_times.append(np.mean(process_times_rep))
+        s_mean = float(np.mean(single_times_rep))
+        t_mean = float(np.mean(thread_times_rep))
+        p_mean = float(np.mean(process_times_rep))
+
+        single_times.append(single_times_rep)
+        thread_times.append(thread_times_rep)
+        process_times.append(process_times_rep)
 
         print(
             f"nvariant_limit={nvariant_limit}: "
-            f"single={single_times_rep:.3f}s, "
-            f"thread={thread_times_rep:.3f}s, "
-            f"process={process_times_rep:.3f}s"
+            f"single={s_mean:.3f}s, "
+            f"thread={t_mean:.3f}s, "
+            f"process={p_mean:.3f}s",
+            file=sys.stderr,
         )
 
-    # Fit OLS models
-    X = nvariant_limits.reshape(-1, 1)
+    # Convert to numpy arrays for numeric ops
+    X = nvariant_limits.astype(float)
+    single_times = np.array(single_times, dtype=float)
+    thread_times = np.array(thread_times, dtype=float)
+    process_times = np.array(process_times, dtype=float)
+
+    # Fit OLS models using numpy-only ols_fit_1d
     models = {
-        "Single-threaded": (single_times, LinearRegression().fit(X, single_times)),
-        "Multi-threaded": (thread_times, LinearRegression().fit(X, thread_times)),
-        "Multi-process": (process_times, LinearRegression().fit(X, process_times)),
+        "Single-threaded": (np.mean(single_times, axis=1), ols_fit_1d(X, single_times, reps=num_reps)),
+        "Multi-threaded": (np.mean(thread_times, axis=1), ols_fit_1d(X, thread_times, reps=num_reps)),
+        "Multi-process": (np.mean(process_times, axis=1), ols_fit_1d(X, process_times, reps=num_reps)),
     }
 
-    plt.figure(figsize=(8,6))
-    for label, (times, model) in models.items():
-        slope = model.coef_[0]
-        if slope == 0:
-            continue
-        print(f"{label} slope: {slope}")
-        line, = plt.plot(nvariant_limits, times, 'o-', label=f"{label} (slope={slope:.5e})")
-        plt.plot(nvariant_limits, model.predict(X), '--', color=line.get_color())
-    plt.xlabel(f"Number of variants\nNumber of samples fixed at {nsample_fixed}")
-    plt.ylabel('Read time (s)')
-    plt.title('PgenReader Timings')
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig('temp/timings_plot.png')
-    print("Plot saved as timings_plot.png")
+    # check that multi-threaded is faster than both single-threaded and multi-processing
+    # by comparing the slopes of the lines
+    for model in ("Single-threaded", "Multi-process"):
+        slope = models[model][1][1]
+        if not np.isnan(slope):
+            assert slope > models["Multi-threaded"][1][1]
+
+    if also_plot:
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(8, 6))
+        for label, (times, (intercept, slope)) in models.items():
+            # skip degenerate slope near zero
+            if np.isnan(slope):
+                continue
+            print(f"{label} slope: {slope}", file=sys.stderr)
+            line, = plt.plot(nvariant_limits, times, 'o-', label=f"{label} (slope={slope:.5e})")
+            y_pred = intercept + slope * X
+            plt.plot(nvariant_limits, y_pred, '--', color=line.get_color())
+
+        plt.xlabel(f"Number of variants\nNumber of samples fixed at {nsample_fixed}")
+        plt.ylabel('Read time (s)')
+        plt.title('PgenReader Timings')
+        plt.legend()
+        plt.tight_layout()
+        output_file_path = str(tmp_path / 'timings_plot.png')
+        plt.savefig(output_file_path)
+        print(f"Plot saved as {output_file_path}", file=sys.stderr)
+
+def test_multithread(tmp_path):
+    main(tmp_path, also_plot=False)
 
 if __name__ == "__main__":
-    main()
+    main(Path("temp"))

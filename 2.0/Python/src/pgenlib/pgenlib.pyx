@@ -1160,7 +1160,7 @@ cdef class PgenReader:
         cdef int32_t* main_data_ptr
         cdef uint32_t variant_idx
         cdef PglErr reterr
-        cdef uint32_t err_flag = 0
+        cdef bint err_flag = 0
         cdef int32_t[:, ::1] allele_int32_view = allele_int32_out
 
         if hap_maj == 0:
@@ -1219,8 +1219,7 @@ cdef class PgenReader:
                 vmaj_geno_iter = multivar_vmaj_geno_buf
                 vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
                 for uii in range(variant_batch_size):
-                    variant_idx = uii + variant_idx_offset
-                    reterr = PgrGetP(subset_include_vec, subset_index, subset_size, variant_idx, pgrp, vmaj_geno_iter, phasepresent, vmaj_phaseinfo_iter, &phasepresent_ct)
+                    reterr = PgrGetP(subset_include_vec, subset_index, subset_size, uii + variant_idx_offset, pgrp, vmaj_geno_iter, phasepresent, vmaj_phaseinfo_iter, &phasepresent_ct)
                     if reterr != kPglRetSuccess:
                         err_flag = 1
                         break
@@ -1255,7 +1254,7 @@ cdef class PgenReader:
                     vmaj_phaseinfo_iter = &(vmaj_phaseinfo_iter[kPglNypTransposeWords // 2])
                 variant_idx_offset += kPglNypTransposeBatch
         if err_flag:
-            raise RuntimeError("variant_idx " + str(variant_idx) + " read_alleles_range() error " + str(reterr))
+            raise RuntimeError("variant_idx " + str(uii + variant_idx_offset) + " read_alleles_range() error " + str(reterr))
         return
 
 

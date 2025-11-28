@@ -1142,78 +1142,6 @@ cdef class PgenReader:
         return
 
 
-    cdef void validate_2d_for_nogil(self, object arr, uintptr_t nvariants, uintptr_t row_stride, void** out_base, size_t expected_itemsize = 0):
-        """
-        Generic validator for C-contiguous 2-D numpy arrays prior to using a
-        raw pointer under nogil.
-
-        - arr: any Python object; must be a numpy.ndarray (checked at runtime).
-        - nvariants: number of variant rows you intend to write/read (in elements).
-        - row_stride: number of elements per row that will be used/written.
-        - out_base: out-parameter; on success out_base[0] will be a void* pointing
-          at the array data (equivalent to &arr[0,0]).
-        - expected_itemsize: if nonzero, validate that arr.itemsize == expected_itemsize.
-
-        Raises RuntimeError on any validation failure.
-
-        Important:
-        - row_stride is in element units (not bytes).
-        """
-        cdef np.ndarray parr
-        cdef uintptr_t rows, cols
-        cdef uintptr_t total_elems
-        cdef uintptr_t needed
-        cdef uintptr_t max_uint = <uintptr_t>(-1)
-        cdef void* data_ptr
-        cdef size_t itemsize
-
-        # Ensure it's an ndarray (do NOT coerce to ndarray via asarray; we
-        # require the caller to pass an ndarray to avoid temporary copies).
-        if not isinstance(arr, np.ndarray):
-            raise RuntimeError("validate_2d_for_nogil(): arr must be a numpy.ndarray")
-
-        # Cast to typed np.ndarray object to access shape/flags safely
-        parr = <np.ndarray>arr
-
-        # Basic 2-D check and contiguity
-        if parr.ndim != 2:
-            raise RuntimeError("validate_2d_for_nogil(): arr must be 2-dimensional")
-        if not parr.flags['C_CONTIGUOUS']:
-            raise RuntimeError("validate_2d_for_nogil(): arr must be C-contiguous")
-
-        # Optionally check itemsize if caller provided an expectation
-        itemsize = <size_t>parr.itemsize
-        if expected_itemsize != 0 and itemsize != expected_itemsize:
-            raise RuntimeError("validate_2d_for_nogil(): arr.itemsize != expected_itemsize")
-
-        # Shapes as uintptr_t for overflow-safe arithmetic
-        rows = <uintptr_t>parr.shape[0]
-        cols = <uintptr_t>parr.shape[1]
-
-        # Basic sanity checks against caller-supplied parameters
-        if nvariants > rows:
-            raise RuntimeError("validate_2d_for_nogil(): nvariants > rows of output array")
-        if row_stride > cols:
-            raise RuntimeError("validate_2d_for_nogil(): row_stride > columns of output array")
-
-        # Check overflow for rows * cols
-        if rows != 0 and cols > max_uint // rows:
-            raise RuntimeError("validate_2d_for_nogil(): output array too large (rows * cols would overflow)")
-        total_elems = rows * cols
-
-        # Check overflow for nvariants * row_stride
-        if nvariants != 0 and row_stride > max_uint // nvariants:
-            raise RuntimeError("validate_2d_for_nogil(): requested region size too large (nvariants * row_stride would overflow)")
-        needed = nvariants * row_stride
-        if needed > total_elems:
-            raise RuntimeError("validate_2d_for_nogil(): requested region does not fit in output buffer")
-
-        # Obtain raw data pointer (void*) using NumPy C API
-        data_ptr = <void*> np.PyArray_DATA(parr)
-        out_base[0] = data_ptr
-        return
-
-
     cpdef read_alleles_range(self, uint32_t variant_idx_start, uint32_t variant_idx_end, np.ndarray[np.int32_t,mode="c",ndim=2] allele_int32_out, bint hap_maj = 0):
         # if hap_maj == False, allele_int32_out must have at least
         #   variant_idx_ct rows, 2 * sample_ct columns
@@ -1232,15 +1160,8 @@ cdef class PgenReader:
         cdef int32_t* main_data_ptr
         cdef uint32_t variant_idx
         cdef PglErr reterr
-        cdef uint32_t vi
-        cdef uintptr_t row_stride = <uintptr_t>(2 * subset_size)
         cdef uint32_t err_flag = 0
-        # A base pointer to allele_int32_out;
-        # Inside nogil we will compute offsets relative to this base
-        cdef int32_t* allele_out_base
-
-        # Run internal checks for the nogil block below
-        self.validate_2d_for_nogil(allele_int32_out, <uintptr_t>variant_idx_ct, row_stride, <void**>&allele_out_base, <size_t>sizeof(int32_t))
+        cdef int32_t[:, ::1] allele_int32_view = allele_int32_out
 
         if hap_maj == 0:
             if allele_int32_out.shape[0] < variant_idx_ct:
@@ -1248,13 +1169,12 @@ cdef class PgenReader:
             if allele_int32_out.shape[1] < 2 * subset_size:
                 raise RuntimeError("Variant-major read_alleles_range() allele_int32_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ", and column count should be twice that)")
             with nogil:
-                for vi in range(variant_idx_ct):
-                    variant_idx = variant_idx_start + vi
+                for variant_idx in range(variant_idx_start, variant_idx_end):
                     reterr = PgrGetMP(subset_include_vec, subset_index, subset_size, variant_idx, pgrp, &self._pgv)
                     if reterr != kPglRetSuccess:
                         err_flag = 1
                         break
-                    main_data_ptr = allele_out_base + vi * row_stride
+                    main_data_ptr = &allele_int32_view[(variant_idx - variant_idx_start), 0]
                     GenoarrMPToAlleleCodesMinus9(&self._pgv, subset_size, NULL, main_data_ptr)
             if err_flag:
                 raise RuntimeError("variant_idx " + str(variant_idx) + " read_alleles_range() error " + str(reterr))
@@ -1325,10 +1245,9 @@ cdef class PgenReader:
                     #       are zero, etc.
                     TransposeBitblock(vmaj_phaseinfo_iter, sample_ctaw, <uint32_t>(kPglNypTransposeWords // 2), variant_batch_size, sample_batch_size, smaj_phaseinfo_iter, transpose_batch_buf)
                     for uii in range(sample_batch_size):
-                        # compute pointer to allele_int32_out[2*sample_row, col_start]
-                        # row_stride == variant_idx_ct (number of columns)
-                        main_data_ptr = allele_out_base + (2 * (uii + sample_batch_idx * kPglNypTransposeBatch)) * variant_idx_ct + (variant_batch_idx * kPglNypTransposeBatch)
-                        main_data1_ptr = main_data_ptr + variant_idx_ct
+                        # bugfix (11 Mar 2023): first index was incorrect
+                        main_data_ptr = &(allele_int32_view[2 * (uii + sample_batch_idx * kPglNypTransposeBatch), variant_batch_idx * kPglNypTransposeBatch])
+                        main_data1_ptr = &(allele_int32_view[2 * (uii + sample_batch_idx * kPglNypTransposeBatch) + 1, variant_batch_idx * kPglNypTransposeBatch])
                         GenoarrPhasedToHapCodes(smaj_geno_iter, smaj_phaseinfo_iter, variant_batch_size, main_data_ptr, main_data1_ptr)
                         smaj_geno_iter = &(smaj_geno_iter[kPglNypTransposeWords])
                         smaj_phaseinfo_iter = &(smaj_phaseinfo_iter[kPglNypTransposeWords // 2])

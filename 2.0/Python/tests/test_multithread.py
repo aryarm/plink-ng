@@ -212,7 +212,7 @@ def main(tmp_path, also_plot: bool = True):
     # by comparing the slopes of the lines
     for model in ("Single-threaded", "Multi-process"):
         slope = models[model][1][1]
-        if not np.isnan(slope):
+        if not np.isnan(slope) and num_cpus > 1:
             assert slope > models["Multi-threaded"][1][1]
 
 def test_multithread(tmp_path):

@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import pgenlib
+import tempfile
 import numpy as np
 from pathlib import Path
 import concurrent.futures
@@ -222,4 +223,8 @@ def test_multithread(tmp_path):
     main(tmp_path, also_plot=False)
 
 if __name__ == "__main__":
-    main(Path("temp"))
+    if len(sys.argv) > 1:
+        main(Path(sys.argv[1]))
+    else:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            main(Path(temp_dir))

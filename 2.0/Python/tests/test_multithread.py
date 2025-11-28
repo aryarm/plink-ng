@@ -124,7 +124,10 @@ def ols_fit_1d(x: np.ndarray, y: np.ndarray, reps: int = 1):
     Fit y = intercept + slope * x by ordinary least squares using numpy.
     Returns (intercept, slope).
     """
-    x = np.repeat(np.asarray(x, dtype=float).ravel(), reps)
+    if y.ndim > 1:
+        x = np.repeat(np.asarray(x, dtype=float).ravel(), reps)
+    else:
+        x = np.asarray(x, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
     if x.size != y.size:
         raise ValueError("x and y must have the same length")
@@ -176,15 +179,15 @@ def main(tmp_path, also_plot: bool = True):
 
     # Convert to numpy arrays for numeric ops
     X = nvariant_limits.astype(float)
-    single_times = np.array(single_times, dtype=float)
-    thread_times = np.array(thread_times, dtype=float)
-    process_times = np.array(process_times, dtype=float)
+    single_times = np.mean(np.array(single_times, dtype=float), axis=1)
+    thread_times = np.mean(np.array(thread_times, dtype=float), axis=1)
+    process_times = np.mean(np.array(process_times, dtype=float), axis=1)
 
     # Fit OLS models using numpy-only ols_fit_1d
     models = {
-        "Single-threaded": (np.mean(single_times, axis=1), ols_fit_1d(X, single_times, reps=num_reps)),
-        "Multi-threaded": (np.mean(thread_times, axis=1), ols_fit_1d(X, thread_times, reps=num_reps)),
-        "Multi-process": (np.mean(process_times, axis=1), ols_fit_1d(X, process_times, reps=num_reps)),
+        "Single-threaded": (single_times, ols_fit_1d(X, single_times, reps=num_reps)),
+        "Multi-threaded": (thread_times, ols_fit_1d(X, thread_times, reps=num_reps)),
+        "Multi-process": (process_times, ols_fit_1d(X, process_times, reps=num_reps)),
     }
 
     if also_plot:

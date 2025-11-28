@@ -152,11 +152,11 @@ cdef extern from "../plink2/include/pgenlib_ffi_support.h" namespace "plink2":
 
     void GenoarrToBytesMinus9(const uintptr_t* genoarr, uint32_t sample_ct, int8_t* genobytes) nogil
     void GenoarrToInt32sMinus9(const uintptr_t* genoarr, uint32_t sample_ct, int32_t* geno_int32) nogil
-    void GenoarrToInt64sMinus9(const uintptr_t* genoarr, uint32_t sample_ct, int64_t* geno_int64)
+    void GenoarrToInt64sMinus9(const uintptr_t* genoarr, uint32_t sample_ct, int64_t* geno_int64) nogil
     void GenoarrMPToAlleleCodesMinus9(const PgenVariantStruct* pgv, uint32_t sample_ct, unsigned char* phasebytes, int32_t* allele_codes) nogil
     void GenoarrPhasedToHapCodes(const uintptr_t* genoarr, const uintptr_t* phaseinfo, uint32_t variant_batch_size, int32_t* hap0_codes_iter, int32_t* hap1_codes_iter) nogil
-    void Dosage16ToFloatsMinus9(const uintptr_t* genoarr, const uintptr_t* dosage_present, const uint16_t* dosage_main, uint32_t sample_ct, uint32_t dosage_ct, float* geno_float)
-    void Dosage16ToDoublesMinus9(const uintptr_t* genoarr, const uintptr_t* dosage_present, const uint16_t* dosage_main, uint32_t sample_ct, uint32_t dosage_ct, double* geno_double)
+    void Dosage16ToFloatsMinus9(const uintptr_t* genoarr, const uintptr_t* dosage_present, const uint16_t* dosage_main, uint32_t sample_ct, uint32_t dosage_ct, float* geno_float) nogil
+    void Dosage16ToDoublesMinus9(const uintptr_t* genoarr, const uintptr_t* dosage_present, const uint16_t* dosage_main, uint32_t sample_ct, uint32_t dosage_ct, double* geno_double) nogil
     void BytesToBitsUnsafe(const uint8_t* boolbytes, uint32_t sample_ct, uintptr_t* bitarr)
     void BytesToGenoarrUnsafe(const int8_t* genobytes, uint32_t sample_ct, uintptr_t* genoarr)
 
@@ -856,19 +856,23 @@ cdef class PgenReader:
         cdef int64_t* data_ptr
         cdef uint32_t variant_idx
         cdef PglErr reterr
-        # TODO: move with nogil statements
+        cdef bint err_flag = 0
+        cdef int64_t[:, ::1] geno_int64_view = geno_int64_out
         if sample_maj == 0:
             if geno_int64_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_range() geno_int_out buffer has too few rows (" + str(geno_int64_out.shape[0]) + "; (variant_idx_end - variant_idx_start) is " + str(variant_idx_ct) + ")")
             if geno_int64_out.shape[1] < subset_size:
                 raise RuntimeError("Variant-major read_range() geno_int_out buffer has too few columns (" + str(geno_int64_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ")")
-            for variant_idx in range(variant_idx_start, variant_idx_end):
-                with nogil:
+            with nogil:
+                for variant_idx in range(variant_idx_start, variant_idx_end):
                     reterr = PgrGet1(subset_include_vec, subset_index, subset_size, variant_idx, allele_idx, pgrp, genovec)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_range() error " + str(reterr))
-                data_ptr = &(geno_int64_out[(variant_idx - variant_idx_start), 0])
-                GenoarrToInt64sMinus9(genovec, subset_size, data_ptr)
+                    if reterr != kPglRetSuccess:
+                        err_flag = 1
+                        break
+                    data_ptr = &(geno_int64_view[(variant_idx - variant_idx_start), 0])
+                    GenoarrToInt64sMinus9(genovec, subset_size, data_ptr)
+            if err_flag:
+                raise RuntimeError("read_range() error " + str(reterr))
             return
         if variant_idx_start >= variant_idx_end:
             raise RuntimeError("read_range() variant_idx_start >= variant_idx_end (" + str(variant_idx_start) + ", " + str(variant_idx_end) + ")")
@@ -890,29 +894,34 @@ cdef class PgenReader:
         cdef uint32_t sample_batch_size
         cdef uint32_t sample_batch_idx
         cdef uint32_t uii
-        for variant_batch_idx in range(variant_batch_ct):
-            if variant_batch_idx == (variant_batch_ct - 1):
-                variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
-            vmaj_iter = multivar_vmaj_geno_buf
-            for uii in range(variant_batch_size):
-                with nogil:
+        with nogil:
+            for variant_batch_idx in range(variant_batch_ct):
+                if variant_batch_idx == (variant_batch_ct - 1):
+                    variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
+                vmaj_iter = multivar_vmaj_geno_buf
+                for uii in range(variant_batch_size):
                     reterr = PgrGet1(subset_include_vec, subset_index, subset_size, uii + variant_idx_offset, allele_idx, pgrp, vmaj_iter)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_range() error " + str(reterr))
-                vmaj_iter = &(vmaj_iter[sample_ctaw2])
-            sample_batch_size = kPglNypTransposeBatch
-            vmaj_iter = multivar_vmaj_geno_buf
-            for sample_batch_idx in range(sample_batch_ct):
-                if sample_batch_idx == sample_batch_ct - 1:
-                    sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
-                smaj_iter = multivar_smaj_geno_batch_buf
-                TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
-                for uii in range(sample_batch_size):
-                    data_ptr = &(geno_int64_out[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch])
-                    GenoarrToInt64sMinus9(smaj_iter, variant_batch_size, data_ptr)
-                    smaj_iter = &(smaj_iter[kPglNypTransposeWords])
-                vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
-            variant_idx_offset += kPglNypTransposeBatch
+                    if reterr != kPglRetSuccess:
+                        err_flag = 1
+                        break
+                    vmaj_iter = &(vmaj_iter[sample_ctaw2])
+                if err_flag:
+                    break
+                sample_batch_size = kPglNypTransposeBatch
+                vmaj_iter = multivar_vmaj_geno_buf
+                for sample_batch_idx in range(sample_batch_ct):
+                    if sample_batch_idx == sample_batch_ct - 1:
+                        sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
+                    smaj_iter = multivar_smaj_geno_batch_buf
+                    TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
+                    for uii in range(sample_batch_size):
+                        data_ptr = &(geno_int64_view[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch])
+                        GenoarrToInt64sMinus9(smaj_iter, variant_batch_size, data_ptr)
+                        smaj_iter = &(smaj_iter[kPglNypTransposeWords])
+                    vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
+                variant_idx_offset += kPglNypTransposeBatch
+        if err_flag:
+            raise RuntimeError("read_range() error " + str(reterr))
         return
 
     cpdef read_range(self, uint32_t variant_idx_start, uint32_t variant_idx_end, np.ndarray geno_int_out, uint32_t allele_idx = 1, bint sample_maj = 0):
@@ -941,22 +950,30 @@ cdef class PgenReader:
         cdef uint32_t variant_list_idx
         cdef uint32_t variant_idx
         cdef PglErr reterr
-        # TODO: move with nogil statements
+        cdef bint err_flag1 = 0
+        cdef bint err_flag2 = 0
+        cdef int8_t[:, ::1] geno_int8_view = geno_int8_out
         if sample_maj == 0:
             if geno_int8_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_list() geno_int_out buffer has too few rows (" + str(geno_int8_out.shape[0]) + "; variant_idxs length is " + str(variant_idx_ct) + ")")
             if geno_int8_out.shape[1] < subset_size:
                 raise RuntimeError("Variant-major read_list() geno_int_out buffer has too few columns (" + str(geno_int8_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ")")
-            for variant_list_idx in range(variant_idx_ct):
-                variant_idx = variant_idxs[variant_list_idx]
-                if variant_idx >= raw_variant_ct:
-                    raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
-                with nogil:
+            with nogil:
+                for variant_list_idx in range(variant_idx_ct):
+                    variant_idx = variant_idxs[variant_list_idx]
+                    if variant_idx >= raw_variant_ct:
+                        err_flag1 = 1
+                        break
                     reterr = PgrGet1(subset_include_vec, subset_index, subset_size, variant_idx, allele_idx, pgrp, genovec)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_range() error " + str(reterr))
-                data_ptr = &(geno_int8_out[variant_list_idx, 0])
-                GenoarrToBytesMinus9(genovec, subset_size, data_ptr)
+                    if reterr != kPglRetSuccess:
+                        err_flag2 = 1
+                        break
+                    data_ptr = &(geno_int8_view[variant_list_idx, 0])
+                    GenoarrToBytesMinus9(genovec, subset_size, data_ptr)
+            if err_flag1:
+                raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
+            if err_flag2:
+                raise RuntimeError("read_range() error " + str(reterr))
             return
         if geno_int8_out.shape[0] < subset_size:
             raise RuntimeError("Sample-major read_list() geno_int_out buffer has too few rows (" + str(geno_int8_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ")")
@@ -976,32 +993,40 @@ cdef class PgenReader:
         cdef uint32_t sample_batch_idx
         cdef uint32_t uii
         variant_list_idx = 0
-        for variant_batch_idx in range(variant_batch_ct):
-            if variant_batch_idx == (variant_batch_ct - 1):
-                variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
-            vmaj_iter = multivar_vmaj_geno_buf
-            for uii in range(variant_batch_size):
-                variant_idx = variant_idxs[uii + variant_list_idx]
-                if variant_idx >= raw_variant_ct:
-                    raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
-                with nogil:
+        with nogil:
+            for variant_batch_idx in range(variant_batch_ct):
+                if variant_batch_idx == (variant_batch_ct - 1):
+                    variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
+                vmaj_iter = multivar_vmaj_geno_buf
+                for uii in range(variant_batch_size):
+                    variant_idx = variant_idxs[uii + variant_list_idx]
+                    if variant_idx >= raw_variant_ct:
+                        err_flag1 = 1
+                        break
                     reterr = PgrGet1(subset_include_vec, subset_index, subset_size, variant_idx, allele_idx, pgrp, vmaj_iter)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_list() error " + str(reterr))
-                vmaj_iter = &(vmaj_iter[sample_ctaw2])
-            sample_batch_size = kPglNypTransposeBatch
-            vmaj_iter = multivar_vmaj_geno_buf
-            for sample_batch_idx in range(sample_batch_ct):
-                if sample_batch_idx == sample_batch_ct - 1:
-                    sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
-                smaj_iter = multivar_smaj_geno_batch_buf
-                TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
-                for uii in range(sample_batch_size):
-                    data_ptr = &(geno_int8_out[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch])
-                    GenoarrToBytesMinus9(smaj_iter, variant_batch_size, data_ptr)
-                    smaj_iter = &(smaj_iter[kPglNypTransposeWords])
-                vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
-            variant_list_idx += kPglNypTransposeBatch
+                    if reterr != kPglRetSuccess:
+                        err_flag2 = 1
+                        break
+                    vmaj_iter = &(vmaj_iter[sample_ctaw2])
+                if err_flag1 or err_flag2:
+                    break
+                sample_batch_size = kPglNypTransposeBatch
+                vmaj_iter = multivar_vmaj_geno_buf
+                for sample_batch_idx in range(sample_batch_ct):
+                    if sample_batch_idx == sample_batch_ct - 1:
+                        sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
+                    smaj_iter = multivar_smaj_geno_batch_buf
+                    TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
+                    for uii in range(sample_batch_size):
+                        data_ptr = &(geno_int8_view[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch])
+                        GenoarrToBytesMinus9(smaj_iter, variant_batch_size, data_ptr)
+                        smaj_iter = &(smaj_iter[kPglNypTransposeWords])
+                    vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
+                variant_list_idx += kPglNypTransposeBatch
+        if err_flag1:
+            raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
+        if err_flag2:
+            raise RuntimeError("read_list() error " + str(reterr))
         return
 
     cdef read_list_internal32(self, np.ndarray[np.uint32_t] variant_idxs, np.ndarray[np.int32_t,mode="c",ndim=2] geno_int32_out, uint32_t allele_idx = 1, bint sample_maj = 0):
@@ -1016,22 +1041,30 @@ cdef class PgenReader:
         cdef uint32_t variant_list_idx
         cdef uint32_t variant_idx
         cdef PglErr reterr
-        # TODO: move with nogil statements
+        cdef bint err_flag1 = 0
+        cdef bint err_flag2 = 0
+        cdef int32_t[:, ::1] geno_int32_view = geno_int32_out
         if sample_maj == 0:
             if geno_int32_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_list() geno_int_out buffer has too few rows (" + str(geno_int32_out.shape[0]) + "; variant_idxs length is " + str(variant_idx_ct) + ")")
             if geno_int32_out.shape[1] < subset_size:
                 raise RuntimeError("Variant-major read_list() geno_int_out buffer has too few columns (" + str(geno_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ")")
-            for variant_list_idx in range(variant_idx_ct):
-                variant_idx = variant_idxs[variant_list_idx]
-                if variant_idx >= raw_variant_ct:
-                    raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
-                with nogil:
+            with nogil:
+                for variant_list_idx in range(variant_idx_ct):
+                    variant_idx = variant_idxs[variant_list_idx]
+                    if variant_idx >= raw_variant_ct:
+                        err_flag1 = 1
+                        break
                     reterr = PgrGet1(subset_include_vec, subset_index, subset_size, variant_idx, allele_idx, pgrp, genovec)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_range() error " + str(reterr))
-                data_ptr = <int32_t*>(&(geno_int32_out[variant_list_idx, 0]))
-                GenoarrToInt32sMinus9(genovec, subset_size, data_ptr)
+                    if reterr != kPglRetSuccess:
+                        err_flag2 = 1
+                        break
+                    data_ptr = &(geno_int32_view[variant_list_idx, 0])
+                    GenoarrToInt32sMinus9(genovec, subset_size, data_ptr)
+            if err_flag1:
+                raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
+            if err_flag2:
+                raise RuntimeError("read_range() error " + str(reterr))
             return
         if geno_int32_out.shape[0] < subset_size:
             raise RuntimeError("Sample-major read_list() geno_int_out buffer has too few rows (" + str(geno_int32_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ")")
@@ -1051,32 +1084,40 @@ cdef class PgenReader:
         cdef uint32_t sample_batch_idx
         cdef uint32_t uii
         variant_list_idx = 0
-        for variant_batch_idx in range(variant_batch_ct):
-            if variant_batch_idx == (variant_batch_ct - 1):
-                variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
-            vmaj_iter = multivar_vmaj_geno_buf
-            for uii in range(variant_batch_size):
-                variant_idx = variant_idxs[uii + variant_list_idx]
-                if variant_idx >= raw_variant_ct:
-                    raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
-                with nogil:
+        with nogil:
+            for variant_batch_idx in range(variant_batch_ct):
+                if variant_batch_idx == (variant_batch_ct - 1):
+                    variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
+                vmaj_iter = multivar_vmaj_geno_buf
+                for uii in range(variant_batch_size):
+                    variant_idx = variant_idxs[uii + variant_list_idx]
+                    if variant_idx >= raw_variant_ct:
+                        err_flag1 = 1
+                        break
                     reterr = PgrGet1(subset_include_vec, subset_index, subset_size, variant_idx, allele_idx, pgrp, vmaj_iter)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_list() error " + str(reterr))
-                vmaj_iter = &(vmaj_iter[sample_ctaw2])
-            sample_batch_size = kPglNypTransposeBatch
-            vmaj_iter = multivar_vmaj_geno_buf
-            for sample_batch_idx in range(sample_batch_ct):
-                if sample_batch_idx == sample_batch_ct - 1:
-                    sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
-                smaj_iter = multivar_smaj_geno_batch_buf
-                TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
-                for uii in range(sample_batch_size):
-                    data_ptr = <int32_t*>(&(geno_int32_out[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch]))
-                    GenoarrToInt32sMinus9(smaj_iter, variant_batch_size, data_ptr)
-                    smaj_iter = &(smaj_iter[kPglNypTransposeWords])
-                vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
-            variant_list_idx += kPglNypTransposeBatch
+                    if reterr != kPglRetSuccess:
+                        err_flag2 = 1
+                        break
+                    vmaj_iter = &(vmaj_iter[sample_ctaw2])
+                if err_flag1 or err_flag2:
+                    break
+                sample_batch_size = kPglNypTransposeBatch
+                vmaj_iter = multivar_vmaj_geno_buf
+                for sample_batch_idx in range(sample_batch_ct):
+                    if sample_batch_idx == sample_batch_ct - 1:
+                        sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
+                    smaj_iter = multivar_smaj_geno_batch_buf
+                    TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
+                    for uii in range(sample_batch_size):
+                        data_ptr = &(geno_int32_view[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch])
+                        GenoarrToInt32sMinus9(smaj_iter, variant_batch_size, data_ptr)
+                        smaj_iter = &(smaj_iter[kPglNypTransposeWords])
+                    vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
+                variant_list_idx += kPglNypTransposeBatch
+        if err_flag1:
+            raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
+        if err_flag2:
+            raise RuntimeError("read_list() error " + str(reterr))
         return
 
     cdef read_list_internal64(self, np.ndarray[np.uint32_t] variant_idxs, np.ndarray[np.int64_t,mode="c",ndim=2] geno_int64_out, uint32_t allele_idx = 1, bint sample_maj = 0):
@@ -1091,22 +1132,30 @@ cdef class PgenReader:
         cdef uint32_t variant_list_idx
         cdef uint32_t variant_idx
         cdef PglErr reterr
-        # TODO: move with nogil statements
+        cdef bint err_flag1 = 0
+        cdef bint err_flag2 = 0
+        cdef int64_t[:, ::1] geno_int64_view = geno_int64_out
         if sample_maj == 0:
             if geno_int64_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_list() geno_int_out buffer has too few rows (" + str(geno_int64_out.shape[0]) + "; variant_idxs length is " + str(variant_idx_ct) + ")")
             if geno_int64_out.shape[1] < subset_size:
                 raise RuntimeError("Variant-major read_list() geno_int_out buffer has too few columns (" + str(geno_int64_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ")")
-            for variant_list_idx in range(variant_idx_ct):
-                variant_idx = variant_idxs[variant_list_idx]
-                if variant_idx >= raw_variant_ct:
-                    raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
-                with nogil:
+            with nogil:
+                for variant_list_idx in range(variant_idx_ct):
+                    variant_idx = variant_idxs[variant_list_idx]
+                    if variant_idx >= raw_variant_ct:
+                        err_flag1 = 1
+                        break
                     reterr = PgrGet1(subset_include_vec, subset_index, subset_size, variant_idx, allele_idx, pgrp, genovec)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_range() error " + str(reterr))
-                data_ptr = &(geno_int64_out[variant_list_idx, 0])
-                GenoarrToInt64sMinus9(genovec, subset_size, data_ptr)
+                    if reterr != kPglRetSuccess:
+                        err_flag2 = 1
+                        break
+                    data_ptr = &(geno_int64_view[variant_list_idx, 0])
+                    GenoarrToInt64sMinus9(genovec, subset_size, data_ptr)
+            if err_flag1:
+                raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
+            if err_flag2:
+                raise RuntimeError("read_range() error " + str(reterr))
             return
         if geno_int64_out.shape[0] < subset_size:
             raise RuntimeError("Sample-major read_list() geno_int_out buffer has too few rows (" + str(geno_int64_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ")")
@@ -1126,32 +1175,40 @@ cdef class PgenReader:
         cdef uint32_t sample_batch_idx
         cdef uint32_t uii
         variant_list_idx = 0
-        for variant_batch_idx in range(variant_batch_ct):
-            if variant_batch_idx == (variant_batch_ct - 1):
-                variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
-            vmaj_iter = multivar_vmaj_geno_buf
-            for uii in range(variant_batch_size):
-                variant_idx = variant_idxs[uii + variant_list_idx]
-                if variant_idx >= raw_variant_ct:
-                    raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
-                with nogil:
+        with nogil:
+            for variant_batch_idx in range(variant_batch_ct):
+                if variant_batch_idx == (variant_batch_ct - 1):
+                    variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
+                vmaj_iter = multivar_vmaj_geno_buf
+                for uii in range(variant_batch_size):
+                    variant_idx = variant_idxs[uii + variant_list_idx]
+                    if variant_idx >= raw_variant_ct:
+                        err_flag1 = 1
+                        break
                     reterr = PgrGet1(subset_include_vec, subset_index, subset_size, variant_idx, allele_idx, pgrp, vmaj_iter)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_list() error " + str(reterr))
-                vmaj_iter = &(vmaj_iter[sample_ctaw2])
-            sample_batch_size = kPglNypTransposeBatch
-            vmaj_iter = multivar_vmaj_geno_buf
-            for sample_batch_idx in range(sample_batch_ct):
-                if sample_batch_idx == sample_batch_ct - 1:
-                    sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
-                smaj_iter = multivar_smaj_geno_batch_buf
-                TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
-                for uii in range(sample_batch_size):
-                    data_ptr = &(geno_int64_out[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch])
-                    GenoarrToInt64sMinus9(smaj_iter, variant_batch_size, data_ptr)
-                    smaj_iter = &(smaj_iter[kPglNypTransposeWords])
-                vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
-            variant_list_idx += kPglNypTransposeBatch
+                    if reterr != kPglRetSuccess:
+                        err_flag2 = 1
+                        break
+                    vmaj_iter = &(vmaj_iter[sample_ctaw2])
+                if err_flag1 or err_flag2:
+                    break
+                sample_batch_size = kPglNypTransposeBatch
+                vmaj_iter = multivar_vmaj_geno_buf
+                for sample_batch_idx in range(sample_batch_ct):
+                    if sample_batch_idx == sample_batch_ct - 1:
+                        sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
+                    smaj_iter = multivar_smaj_geno_batch_buf
+                    TransposeNypblock(vmaj_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_iter, transpose_batch_buf)
+                    for uii in range(sample_batch_size):
+                        data_ptr = &(geno_int64_view[uii + sample_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch])
+                        GenoarrToInt64sMinus9(smaj_iter, variant_batch_size, data_ptr)
+                        smaj_iter = &(smaj_iter[kPglNypTransposeWords])
+                    vmaj_iter = &(vmaj_iter[kPglNypTransposeWords])
+                variant_list_idx += kPglNypTransposeBatch
+        if err_flag1:
+            raise RuntimeError("read_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
+        if err_flag2:
+            raise RuntimeError("read_list() error " + str(reterr))
         return
 
     cpdef read_list(self, np.ndarray[np.uint32_t] variant_idxs, np.ndarray geno_int_out, uint32_t allele_idx = 1, bint sample_maj = 0):
@@ -1299,22 +1356,30 @@ cdef class PgenReader:
         cdef uint32_t variant_list_idx
         cdef uint32_t variant_idx
         cdef PglErr reterr
-        # TODO: move with nogil statements
+        cdef bint err_flag1 = 0
+        cdef bint err_flag2 = 0
+        cdef int32_t[:, ::1] allele_int32_view = allele_int32_out
         if hap_maj == 0:
             if allele_int32_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_alleles_list() allele_int32_out buffer has too few rows (" + str(allele_int32_out.shape[0]) + "; variant_idxs length is " + str(variant_idx_ct) + ")")
             if allele_int32_out.shape[1] < 2 * subset_size:
                 raise RuntimeError("Variant-major read_alleles_list() allele_int32_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ", and column count should be twice that)")
-            for variant_list_idx in range(variant_idx_ct):
-                variant_idx = variant_idxs[variant_list_idx]
-                if variant_idx >= raw_variant_ct:
-                    raise RuntimeError("read_alleles_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
-                with nogil:
+            with nogil:
+                for variant_list_idx in range(variant_idx_ct):
+                    variant_idx = variant_idxs[variant_list_idx]
+                    if variant_idx >= raw_variant_ct:
+                        err_flag1 = 1
+                        break    
                     reterr = PgrGetMP(subset_include_vec, subset_index, subset_size, variant_idx, pgrp, &self._pgv)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_alleles_list() error " + str(reterr))
-                main_data_ptr = <int32_t*>(&(allele_int32_out[variant_list_idx, 0]))
-                GenoarrMPToAlleleCodesMinus9(&self._pgv, subset_size, NULL, main_data_ptr)
+                    if reterr != kPglRetSuccess:
+                        err_flag2 = 1
+                        break
+                    main_data_ptr = &(allele_int32_view[variant_list_idx, 0])
+                    GenoarrMPToAlleleCodesMinus9(&self._pgv, subset_size, NULL, main_data_ptr)
+            if err_flag1:
+                raise RuntimeError("read_alleles_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
+            if err_flag2:
+                raise RuntimeError("read_alleles_list() error " + str(reterr))
             return
         if allele_int32_out.shape[0] < 2 * subset_size:
             raise RuntimeError("Haplotype-major read_alleles_list() allele_int32_out buffer has too few rows (" + str(allele_int32_out.shape[0]) + "; current sample subset has size " + str(subset_size) + ", and row count should be twice that)")
@@ -1342,49 +1407,61 @@ cdef class PgenReader:
         cdef uint32_t sample_batch_idx
         cdef uint32_t phasepresent_ct
         cdef uint32_t uii
-        for variant_batch_idx in range(variant_batch_ct):
-            if variant_batch_idx == (variant_batch_ct - 1):
-                variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
-                variant_batch_sizel = DivUp(variant_batch_size, kBitsPerWord)
-            vmaj_geno_iter = multivar_vmaj_geno_buf
-            vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
-            for variant_list_idx in range(variant_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch + variant_batch_size):
-                variant_idx = variant_idxs[variant_list_idx]
-                if variant_idx >= raw_variant_ct:
-                    raise RuntimeError("read_alleles_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
-                if allele_idx_offsets != NULL:
-                    if allele_idx_offsets[variant_idx + 1] - allele_idx_offsets[variant_idx] != 2:
-                        raise RuntimeError("Haplotype-major read_alleles_list() doesn't support multiallelic variants yet.")
-                with nogil:
+        cdef bint err_flag3 = 0
+        with nogil:
+            for variant_batch_idx in range(variant_batch_ct):
+                if variant_batch_idx == (variant_batch_ct - 1):
+                    variant_batch_size = 1 + <uint32_t>((variant_idx_ct - 1) % kPglNypTransposeBatch)
+                    variant_batch_sizel = DivUp(variant_batch_size, kBitsPerWord)
+                vmaj_geno_iter = multivar_vmaj_geno_buf
+                vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
+                for variant_list_idx in range(variant_batch_idx * kPglNypTransposeBatch, variant_batch_idx * kPglNypTransposeBatch + variant_batch_size):
+                    variant_idx = variant_idxs[variant_list_idx]
+                    if variant_idx >= raw_variant_ct:
+                        err_flag1 = 1
+                        break
+                    if allele_idx_offsets != NULL:
+                        if allele_idx_offsets[variant_idx + 1] - allele_idx_offsets[variant_idx] != 2:
+                            err_flag3 = 1
+                            break
                     reterr = PgrGetP(subset_include_vec, subset_index, subset_size, variant_idx, pgrp, vmaj_geno_iter, phasepresent, vmaj_phaseinfo_iter, &phasepresent_ct)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_alleles_list() error " + str(reterr))
-                if phasepresent_ct == 0:
-                    ZeroWArr(sample_ctaw, vmaj_phaseinfo_iter)
-                # else:
-                    # BitvecAnd(phasepresent, sample_ctaw, vmaj_phaseinfo_iter)
-                vmaj_geno_iter = &(vmaj_geno_iter[sample_ctaw2])
-                vmaj_phaseinfo_iter = &(vmaj_phaseinfo_iter[sample_ctaw])
-            sample_batch_size = kPglNypTransposeBatch
-            vmaj_geno_iter = multivar_vmaj_geno_buf
-            vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
-            for sample_batch_idx in range(sample_batch_ct):
-                if sample_batch_idx == sample_batch_ct - 1:
-                    sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
-                smaj_geno_iter = multivar_smaj_geno_batch_buf
-                smaj_phaseinfo_iter = multivar_smaj_phaseinfo_batch_buf
-                TransposeNypblock(vmaj_geno_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_geno_iter, transpose_batch_buf)
-                # todo: skip bitblock transpose when all phasepresent_ct values
-                #       are zero, etc.
-                TransposeBitblock(vmaj_phaseinfo_iter, sample_ctaw, <uint32_t>(kPglNypTransposeWords // 2), variant_batch_size, sample_batch_size, smaj_phaseinfo_iter, transpose_batch_buf)
-                for uii in range(sample_batch_size):
-                    main_data_ptr = <int32_t*>(&(allele_int32_out[2 * (uii + sample_batch_idx * kPglNypTransposeBatch), variant_batch_idx * kPglNypTransposeBatch]))
-                    main_data1_ptr = <int32_t*>(&(allele_int32_out[2 * (uii + sample_batch_idx * kPglNypTransposeBatch) + 1, variant_batch_idx * kPglNypTransposeBatch]))
-                    GenoarrPhasedToHapCodes(smaj_geno_iter, smaj_phaseinfo_iter, variant_batch_size, main_data_ptr, main_data1_ptr)
-                    smaj_geno_iter = &(smaj_geno_iter[kPglNypTransposeWords])
-                    smaj_phaseinfo_iter = &(smaj_phaseinfo_iter[kPglNypTransposeWords // 2])
-                vmaj_geno_iter = &(vmaj_geno_iter[kPglNypTransposeWords])
-                vmaj_phaseinfo_iter = &(vmaj_phaseinfo_iter[kPglNypTransposeWords // 2])
+                    if reterr != kPglRetSuccess:
+                        err_flag2 = 1
+                        break
+                    if phasepresent_ct == 0:
+                        ZeroWArr(sample_ctaw, vmaj_phaseinfo_iter)
+                    # else:
+                        # BitvecAnd(phasepresent, sample_ctaw, vmaj_phaseinfo_iter)
+                    vmaj_geno_iter = &(vmaj_geno_iter[sample_ctaw2])
+                    vmaj_phaseinfo_iter = &(vmaj_phaseinfo_iter[sample_ctaw])
+                if err_flag1 or err_flag2 or err_flag3:
+                    break
+                sample_batch_size = kPglNypTransposeBatch
+                vmaj_geno_iter = multivar_vmaj_geno_buf
+                vmaj_phaseinfo_iter = multivar_vmaj_phaseinfo_buf
+                for sample_batch_idx in range(sample_batch_ct):
+                    if sample_batch_idx == sample_batch_ct - 1:
+                        sample_batch_size = 1 + <uint32_t>((subset_size - 1) % kPglNypTransposeBatch)
+                    smaj_geno_iter = multivar_smaj_geno_batch_buf
+                    smaj_phaseinfo_iter = multivar_smaj_phaseinfo_batch_buf
+                    TransposeNypblock(vmaj_geno_iter, sample_ctaw2, kPglNypTransposeWords, variant_batch_size, sample_batch_size, smaj_geno_iter, transpose_batch_buf)
+                    # todo: skip bitblock transpose when all phasepresent_ct values
+                    #       are zero, etc.
+                    TransposeBitblock(vmaj_phaseinfo_iter, sample_ctaw, <uint32_t>(kPglNypTransposeWords // 2), variant_batch_size, sample_batch_size, smaj_phaseinfo_iter, transpose_batch_buf)
+                    for uii in range(sample_batch_size):
+                        main_data_ptr = &(allele_int32_view[2 * (uii + sample_batch_idx * kPglNypTransposeBatch), variant_batch_idx * kPglNypTransposeBatch])
+                        main_data1_ptr = &(allele_int32_view[2 * (uii + sample_batch_idx * kPglNypTransposeBatch) + 1, variant_batch_idx * kPglNypTransposeBatch])
+                        GenoarrPhasedToHapCodes(smaj_geno_iter, smaj_phaseinfo_iter, variant_batch_size, main_data_ptr, main_data1_ptr)
+                        smaj_geno_iter = &(smaj_geno_iter[kPglNypTransposeWords])
+                        smaj_phaseinfo_iter = &(smaj_phaseinfo_iter[kPglNypTransposeWords // 2])
+                    vmaj_geno_iter = &(vmaj_geno_iter[kPglNypTransposeWords])
+                    vmaj_phaseinfo_iter = &(vmaj_phaseinfo_iter[kPglNypTransposeWords // 2])
+        if err_flag1:
+            raise RuntimeError("read_alleles_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
+        if err_flag2:
+            raise RuntimeError("read_alleles_list() error " + str(reterr))
+        if err_flag3:
+            raise RuntimeError("Haplotype-major read_alleles_list() doesn't support multiallelic variants yet.")
         return
 
 
@@ -1404,7 +1481,9 @@ cdef class PgenReader:
         cdef unsigned char* phasepresent_data_ptr
         cdef uint32_t variant_idx
         cdef PglErr reterr
-        # TODO: move with nogil statements
+        cdef bint err_flag = 0
+        cdef int32_t[:, ::1] allele_int32_view = allele_int32_out
+        cdef uint8_t[:, ::1] phasepresent_view = phasepresent_out
         if hap_maj == 0:
             if allele_int32_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_alleles_and_phasepresent_range() allele_int32_out buffer has too few rows (" + str(allele_int32_out.shape[0]) + "; (variant_idx_end - variant_idx_start) is " + str(variant_idx_ct) + ")")
@@ -1414,14 +1493,17 @@ cdef class PgenReader:
                 raise RuntimeError("Variant-major read_alleles_and_phasepresent_range() allele_int32_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ", and column count should be twice that)")
             if phasepresent_out.shape[1] < subset_size:
                 raise RuntimeError("Variant-major read_alleles_and_phasepresent_range() phasepresent_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ")")
-            for variant_idx in range(variant_idx_start, variant_idx_end):
-                with nogil:
+            with nogil:
+                for variant_idx in range(variant_idx_start, variant_idx_end):
                     reterr = PgrGetMP(subset_include_vec, subset_index, subset_size, variant_idx, pgrp, &self._pgv)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("variant_idx " + str(variant_idx) + " read_alleles_and_phasepresent_range() error " + str(reterr))
-                main_data_ptr = <int32_t*>(&(allele_int32_out[(variant_idx - variant_idx_start), 0]))
-                phasepresent_data_ptr = <unsigned char*>(&(phasepresent_out[(variant_idx - variant_idx_start), 0]))
-                GenoarrMPToAlleleCodesMinus9(&self._pgv, subset_size, phasepresent_data_ptr, main_data_ptr)
+                    if reterr != kPglRetSuccess:
+                        err_flag = 1
+                        break
+                    main_data_ptr = &(allele_int32_view[(variant_idx - variant_idx_start), 0])
+                    phasepresent_data_ptr = &(phasepresent_view[(variant_idx - variant_idx_start), 0])
+                    GenoarrMPToAlleleCodesMinus9(&self._pgv, subset_size, phasepresent_data_ptr, main_data_ptr)
+            if err_flag:
+                raise RuntimeError("variant_idx " + str(variant_idx) + " read_alleles_and_phasepresent_range() error " + str(reterr))
             return
         raise RuntimeError("read_alleles_and_phasepresent_range() does not support hap_maj == 1 yet.")
 
@@ -1445,7 +1527,10 @@ cdef class PgenReader:
         cdef uint32_t variant_list_idx
         cdef uint32_t variant_idx
         cdef PglErr reterr
-        # TODO: move with nogil statements
+        cdef bint err_flag1 = 0
+        cdef bint err_flag2 = 0
+        cdef int32_t[:, ::1] allele_int32_view = allele_int32_out
+        cdef uint8_t[:, ::1] phasepresent_view = phasepresent_out
         if hap_maj == 0:
             if allele_int32_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_alleles_and_phasepresent_list() allele_int32_out buffer has too few rows (" + str(allele_int32_out.shape[0]) + "; variant_idxs length is " + str(variant_idx_ct) + ")")
@@ -1455,17 +1540,23 @@ cdef class PgenReader:
                 raise RuntimeError("Variant-major read_alleles_and_phasepresent_list() allele_int32_out buffer has too few columns (" + str(allele_int32_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ", and column count should be twice that)")
             if phasepresent_out.shape[1] < subset_size:
                 raise RuntimeError("Variant-major read_alleles_and_phasepresent_list() phasepresent_out buffer has too few columns (" + str(phasepresent_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ")")
-            for variant_list_idx in range(variant_idx_ct):
-                variant_idx = variant_idxs[variant_list_idx]
-                if variant_idx >= raw_variant_ct:
-                    raise RuntimeError("read_alleles_and_phasepresent_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
-                with nogil:
+            with nogil:
+                for variant_list_idx in range(variant_idx_ct):
+                    variant_idx = variant_idxs[variant_list_idx]
+                    if variant_idx >= raw_variant_ct:
+                        err_flag1 = 1
+                        break
                     reterr = PgrGetMP(subset_include_vec, subset_index, subset_size, variant_idx, pgrp, &self._pgv)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_alleles_and_phasepresent_list() error " + str(reterr))
-                main_data_ptr = <int32_t*>(&(allele_int32_out[variant_list_idx, 0]))
-                phasepresent_data_ptr = <unsigned char*>(&(phasepresent_out[variant_list_idx, 0]))
-                GenoarrMPToAlleleCodesMinus9(&self._pgv, subset_size, phasepresent_data_ptr, main_data_ptr)
+                    if reterr != kPglRetSuccess:
+                        err_flag2 = 1
+                        break
+                    main_data_ptr = &(allele_int32_view[variant_list_idx, 0])
+                    phasepresent_data_ptr = &(phasepresent_view[variant_list_idx, 0])
+                    GenoarrMPToAlleleCodesMinus9(&self._pgv, subset_size, phasepresent_data_ptr, main_data_ptr)
+            if err_flag1:
+                raise RuntimeError("read_alleles_and_phasepresent_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
+            if err_flag2:
+                raise RuntimeError("read_alleles_and_phasepresent_list() error " + str(reterr))
             return
         raise RuntimeError("read_alleles_and_phasepresent_list() does not support hap_maj == 1 yet.")
 
@@ -1483,15 +1574,19 @@ cdef class PgenReader:
         cdef uint32_t variant_idx
         cdef uint32_t dosage_ct
         cdef PglErr reterr
-        # TODO: move with nogil statements
+        cdef bint err_flag = 0
+        cdef float[:, ::1] floatarr_view = floatarr_out
         if sample_maj == 0:
-            for variant_idx in range(variant_idx_start, variant_idx_end):
-                with nogil:
+            with nogil:
+                for variant_idx in range(variant_idx_start, variant_idx_end):
                     reterr = PgrGet1D(subset_include_vec, subset_index, subset_size, variant_idx, allele_idx, pgrp, genovec, dosage_present, dosage_main, &dosage_ct)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_dosages_range() error " + str(reterr))
-                data32_ptr = <float*>(&(floatarr_out[(variant_idx - variant_idx_start), 0]))
-                Dosage16ToFloatsMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data32_ptr)
+                    if reterr != kPglRetSuccess:
+                        err_flag = 1
+                        break
+                    data32_ptr = &(floatarr_view[(variant_idx - variant_idx_start), 0])
+                    Dosage16ToFloatsMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data32_ptr)
+            if err_flag:
+                raise RuntimeError("read_dosages_range() error " + str(reterr))
             return
         raise RuntimeError("read_dosages_range() does not support sample_maj == 1 yet.")
 
@@ -1509,15 +1604,19 @@ cdef class PgenReader:
         cdef uint32_t variant_idx
         cdef uint32_t dosage_ct
         cdef PglErr reterr
-        # TODO: move with nogil statements
+        cdef bint err_flag = 0
+        cdef double[:, ::1] floatarr_view = floatarr_out
         if sample_maj == 0:
-            for variant_idx in range(variant_idx_start, variant_idx_end):
-                with nogil:
+            with nogil:
+                for variant_idx in range(variant_idx_start, variant_idx_end):
                     reterr = PgrGet1D(subset_include_vec, subset_index, subset_size, variant_idx, allele_idx, pgrp, genovec, dosage_present, dosage_main, &dosage_ct)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_dosages_range() error " + str(reterr))
-                data64_ptr = <double*>(&(floatarr_out[(variant_idx - variant_idx_start), 0]))
-                Dosage16ToDoublesMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data64_ptr)
+                    if reterr != kPglRetSuccess:
+                        err_flag = 1
+                        break
+                    data64_ptr = &(floatarr_view[(variant_idx - variant_idx_start), 0])
+                    Dosage16ToDoublesMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data64_ptr)
+            if err_flag:
+                raise RuntimeError("read_dosages_range() error " + str(reterr))
             return
         raise RuntimeError("read_dosages_range() does not support sample_maj == 1 yet.")
 
@@ -1549,22 +1648,30 @@ cdef class PgenReader:
         cdef uint32_t variant_idx
         cdef uint32_t dosage_ct
         cdef PglErr reterr
-        # TODO: move with nogil statements
+        cdef bint err_flag1 = 0
+        cdef bint err_flag2 = 0
+        cdef float[:, ::1] floatarr_view = floatarr_out
         if sample_maj == 0:
             if floatarr_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_dosages_list() floatarr_out buffer has too few rows (" + str(floatarr_out.shape[0]) + "; variant_idxs length is " + str(variant_idx_ct) + ")")
             if floatarr_out.shape[1] < subset_size:
                 raise RuntimeError("Variant-major read_dosages_list() floatarr_out buffer has too few columns (" + str(floatarr_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ")")
-            for variant_list_idx in range(variant_idx_ct):
-                variant_idx = variant_idxs[variant_list_idx]
-                if variant_idx >= raw_variant_ct:
-                    raise RuntimeError("read_dosages_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
-                with nogil:
+            with nogil:
+                for variant_list_idx in range(variant_idx_ct):
+                    variant_idx = variant_idxs[variant_list_idx]
+                    if variant_idx >= raw_variant_ct:
+                        err_flag1 = 1
+                        break
                     reterr = PgrGet1D(subset_include_vec, subset_index, subset_size, variant_idx, allele_idx, pgrp, genovec, dosage_present, dosage_main, &dosage_ct)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_range() error " + str(reterr))
-                data32_ptr = <float*>(&(floatarr_out[variant_list_idx, 0]))
-                Dosage16ToFloatsMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data32_ptr)
+                    if reterr != kPglRetSuccess:
+                        err_flag2 = 1
+                        break
+                    data32_ptr = &(floatarr_view[variant_list_idx, 0])
+                    Dosage16ToFloatsMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data32_ptr)
+            if err_flag1:
+                raise RuntimeError("read_dosages_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
+            if err_flag2:
+                raise RuntimeError("read_range() error " + str(reterr))
             return
         raise RuntimeError("read_dosages_list() does not support sample_maj == 1 yet.")
 
@@ -1584,22 +1691,30 @@ cdef class PgenReader:
         cdef uint32_t variant_idx
         cdef uint32_t dosage_ct
         cdef PglErr reterr
-        # TODO: move with nogil statements
+        cdef bint err_flag1 = 0
+        cdef bint err_flag2 = 0
+        cdef double[:, ::1] floatarr_view = floatarr_out
         if sample_maj == 0:
             if floatarr_out.shape[0] < variant_idx_ct:
                 raise RuntimeError("Variant-major read_dosages_list() floatarr_out buffer has too few rows (" + str(floatarr_out.shape[0]) + "; variant_idxs length is " + str(variant_idx_ct) + ")")
             if floatarr_out.shape[1] < subset_size:
                 raise RuntimeError("Variant-major read_dosages_list() floatarr_out buffer has too few columns (" + str(floatarr_out.shape[1]) + "; current sample subset has size " + str(subset_size) + ")")
-            for variant_list_idx in range(variant_idx_ct):
-                variant_idx = variant_idxs[variant_list_idx]
-                if variant_idx >= raw_variant_ct:
-                    raise RuntimeError("read_dosages_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
-                with nogil:
+            with nogil:
+                for variant_list_idx in range(variant_idx_ct):
+                    variant_idx = variant_idxs[variant_list_idx]
+                    if variant_idx >= raw_variant_ct:
+                        err_flag1 = 1
+                        break
                     reterr = PgrGet1D(subset_include_vec, subset_index, subset_size, variant_idx, allele_idx, pgrp, genovec, dosage_present, dosage_main, &dosage_ct)
-                if reterr != kPglRetSuccess:
-                    raise RuntimeError("read_range() error " + str(reterr))
-                data64_ptr = <double*>(&(floatarr_out[variant_list_idx, 0]))
-                Dosage16ToDoublesMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data64_ptr)
+                    if reterr != kPglRetSuccess:
+                        err_flag2 = 1
+                        break
+                    data64_ptr = &(floatarr_view[variant_list_idx, 0])
+                    Dosage16ToDoublesMinus9(genovec, dosage_present, dosage_main, subset_size, dosage_ct, data64_ptr)
+            if err_flag1:
+                raise RuntimeError("read_dosages_list() variant index too large (" + str(variant_idx) + "; only " + str(raw_variant_ct) + " in file)")
+            if err_flag2:
+                raise RuntimeError("read_range() error " + str(reterr))
             return
         raise RuntimeError("read_dosages_list() does not support sample_maj == 1 yet.")
 

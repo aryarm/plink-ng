@@ -3581,196 +3581,711 @@ void CleanupPlink2CmdlineMeta(Plink2CmdlineMeta* pcmp) {
 
 
 void InitCmpExpr(CmpExpr* cmp_expr_ptr) {
-  cmp_expr_ptr->pheno_name = nullptr;
+  cmp_expr_ptr->etype = kCmpExprTypeNull;
+}
+
+void CleanupCmpExprInternal(CmpExpr* cmp_expr_ptr) {
+  const CmpExprType etype = cmp_expr_ptr->etype;
+  if (etype == kCmpExprTypeNull) {
+    return;
+  }
+  if (CmpExprIsK(etype)) {
+    free(cmp_expr_ptr->args.k.key);
+    return;
+  }
+  if (CmpExprIsKN(etype)) {
+    free(cmp_expr_ptr->args.kn.key);
+    return;
+  }
+  if (CmpExprIsJct(etype)) {
+    CleanupCmpExprInternal(cmp_expr_ptr->args.jct.children[0]);
+    if (etype != kCmpExprTypeNot) {
+      CleanupCmpExprInternal(cmp_expr_ptr->args.jct.children[1]);
+    }
+    return;
+  }
+  assert(CmpExprIsKS(etype));
+  free(cmp_expr_ptr->args.ks.str_value);
+  free(cmp_expr_ptr->args.ks.key);
 }
 
 void CleanupCmpExpr(CmpExpr* cmp_expr_ptr) {
-  free_cond(cmp_expr_ptr->pheno_name);
+  CleanupCmpExprInternal(cmp_expr_ptr);
+  cmp_expr_ptr->etype = kCmpExprTypeNull;  // defend against repeated calls
 }
 
-// may want CXXCONST_CP treatment later
-const char* ParseNextBinaryOp(const char* expr_str, uint32_t expr_slen, const char** op_start_ptr, CmpBinaryOp* binary_op_ptr) {
-  // !=, <>: kCmpOperatorNoteq
-  // <: kCmpOperatorLe
-  // <=: kCmpOperatorLeq
-  // =, ==: kCmpOperatorEq
-  // >=: kCmpOperatorGeq
-  // >: kCmpOperatorGe
-  const char* next_eq = S_CAST(const char*, memchr(expr_str, '=', expr_slen));
-  const char* next_lt = S_CAST(const char*, memchr(expr_str, '<', expr_slen));
-  const char* next_gt = S_CAST(const char*, memchr(expr_str, '>', expr_slen));
-  if (!next_eq) {
-    if (!next_lt) {
-      // may want to remove unlikely() later
-      if (unlikely(!next_gt)) {
-        return nullptr;
+// Advances (param_idx, offset) to the start of the next token in sources[],
+// returning the leading character on success.
+//
+// If we're already at the start of a token, no advancement occurs.
+//
+// If there are no more tokens, returns the null character and sets param_idx
+// == param_ct.
+uint32_t CmpExprNextToken(const char* const* sources, uint32_t param_ct, uint32_t* param_idx_ptr, uint32_t* offset_ptr) {
+  uint32_t param_idx = *param_idx_ptr;
+  if (param_idx == param_ct) {
+    return 0;
+  }
+  uint32_t offset = *offset_ptr;
+  const char* cur_param = sources[param_idx];
+  while (1) {
+    const unsigned char char_ui = cur_param[offset];
+    if (char_ui) {
+      if (char_ui > ' ') {
+        *param_idx_ptr = param_idx;
+        *offset_ptr = offset;
+        return char_ui;
       }
-      *op_start_ptr = next_gt;
-      *binary_op_ptr = kCmpOperatorGe;
-      return &(next_gt[1]);
+      ++offset;
+      continue;
     }
-    if (next_gt == (&(next_lt[1]))) {
-      *op_start_ptr = next_lt;
-      *binary_op_ptr = kCmpOperatorNoteq;
-      return &(next_lt[2]);
+    if (++param_idx == param_ct) {
+      *param_idx_ptr = param_idx;
+      *offset_ptr = 0;
+      return 0;
     }
-    if ((!next_gt) || (next_gt > next_lt)) {
-      *op_start_ptr = next_lt;
-      *binary_op_ptr = kCmpOperatorLe;
-      return &(next_lt[1]);
-    }
-    *op_start_ptr = next_gt;
-    *binary_op_ptr = kCmpOperatorGe;
-    return &(next_gt[1]);
+    cur_param = sources[param_idx];
+    offset = 0;
   }
-  if ((!next_lt) || (next_lt > next_eq)) {
-    if ((!next_gt) || (next_gt > next_eq)) {
-      if ((next_eq != expr_str) && (next_eq[-1] == '!')) {
-        *op_start_ptr = &(next_eq[-1]);
-        *binary_op_ptr = kCmpOperatorNoteq;
-        return &(next_eq[1]);
+}
+
+// If etype == kCmpExprTypeNot, *cmp_expr_ptr is initialized to a not-node with
+// one child, and a pointer to the child is returned.
+//
+// Otherwise, *cmp_expr_ptr is expected to already contain the parse tree for
+// the first child.  In this case, we allocate child nodes, copy *cmp_expr_ptr
+// to the first child, overwrite *cmp_expr_ptr with the new conjunction or
+// disjunction parent node, and return a pointer to the second child.
+//
+// A null pointer is return on malloc failure.
+CmpExpr* CmpExprNewJct(CmpExprType etype, CmpExpr* cmp_expr_ptr) {
+  CmpExpr* new_last_child;
+  if (unlikely(pgl_malloc(sizeof(CmpExpr), &new_last_child))) {
+    return nullptr;
+  }
+  new_last_child->etype = kCmpExprTypeNull;
+  if (etype == kCmpExprTypeNot) {
+    assert(cmp_expr_ptr->etype == kCmpExprTypeNull);
+    cmp_expr_ptr->etype = kCmpExprTypeNot;
+    cmp_expr_ptr->args.jct.children[0] = new_last_child;
+    return new_last_child;
+  }
+  CmpExpr* new_left_child;
+  if (unlikely(pgl_malloc(sizeof(CmpExpr), &new_left_child))) {
+    free(new_last_child);
+    return nullptr;
+  }
+  *new_left_child = *cmp_expr_ptr;
+  cmp_expr_ptr->etype = etype;
+  cmp_expr_ptr->args.jct.children[0] = new_left_child;
+  cmp_expr_ptr->args.jct.children[1] = new_last_child;
+  return new_last_child;
+}
+
+// If we're at the start of an and-token, returns 1 and advances offset past
+// it.  Otherwise returns 0.
+uint32_t CmpExprAnd(const char* cur_param, uint32_t* offset_ptr) {
+  uint32_t offset = *offset_ptr;
+  uint32_t char_ui = ctou32(cur_param[offset]);
+  if (char_ui == '&') {
+    // Consume '&' or '&&'.
+    ++offset;
+    *offset_ptr = offset + (cur_param[offset] == '&');
+    return 1;
+  }
+  // Also permit 'and' (any capitalization) followed by whitespace or
+  // left-parenthesis.
+  if (((char_ui & 0xdf) != 'A') || ((ctou32(cur_param[offset + 1]) & 0xdf) != 'N') || ((ctou32(cur_param[offset + 2]) & 0xdf) != 'D')) {
+    return 0;
+  }
+  offset += 3;
+  char_ui = ctou32(cur_param[offset]);
+  if ((char_ui <= 32) || (char_ui == '(')) {
+    *offset_ptr = offset;
+    return 1;
+  }
+  return 0;
+}
+
+// If we're at the start of an or-token, returns 1 and advances offset past it.
+// Otherwise returns 0.
+uint32_t CmpExprOr(const char* cur_param, uint32_t* offset_ptr) {
+  uint32_t offset = *offset_ptr;
+  uint32_t char_ui = ctou32(cur_param[offset]);
+  if (char_ui == '|') {
+    // Consume '|' or '||'.
+    ++offset;
+    *offset_ptr = offset + (cur_param[offset] == '|');
+    return 1;
+  }
+  // Also permit 'or' (any capitalization) followed by whitespace or
+  // left-parenthesis.
+  if (((char_ui & 0xdf) != 'O') || ((ctou32(cur_param[offset + 1]) & 0xdf) != 'R')) {
+    return 0;
+  }
+  offset += 2;
+  char_ui = ctou32(cur_param[offset]);
+  if ((char_ui <= 32) || (char_ui == '(')) {
+    *offset_ptr = offset;
+    return 1;
+  }
+  return 0;
+}
+
+// Key-ending characters (if un-escaped):
+//   all ASCII <= 32
+//   ! (33)
+//   " (34)
+//   & (38)
+//   ( (40)
+//   ) (41)
+//   < (60)
+//   = (61)
+//   > (62)
+//   | (124)
+//   ~ (126) (reserved for possible future regex matcher)
+const uint8_t kCmpExprIsKeyEnd[256] = {
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+};
+
+// If we're at the start of a number-token, returns 1, advances offset past it,
+// and initializes *num_ptr to the parsed value.  Otherwise returns 0.
+uint32_t CmpExprNumber(const char* cur_param, uint32_t* offset_ptr, double* num_ptr) {
+  uint32_t offset = *offset_ptr;
+  const char* num_start = &(cur_param[offset]);
+  const char* num_end = ScanadvDouble(&(cur_param[offset]), num_ptr);
+  if (!num_end) {
+    return 0;
+  }
+  const uint32_t char_ui = ctou32(*num_end);
+  // update (15 Nov 2025): best for this to match end-of-key logic.
+  if (kCmpExprIsKeyEnd[char_ui]) {
+    *offset_ptr = offset + S_CAST(uintptr_t, num_end - num_start);
+    return 1;
+  }
+  return 0;
+}
+
+uint32_t CmpExprNumCompare(const char* cur_param, uint32_t num_first, uint32_t* offset_ptr, CmpExprType* etype_ptr) {
+  uint32_t offset = *offset_ptr;
+  const uint32_t first_char_ui = ctou32(cur_param[offset]);
+  ++offset;
+  if (first_char_ui < '<') {
+    if ((first_char_ui != '!') || (cur_param[offset] != '=')) {
+      return 0;
+    }
+    *offset_ptr = offset + 1;
+    *etype_ptr = kCmpExprTypeNoteq;
+    return 1;
+  }
+  if (first_char_ui > '>') {
+    return 0;
+  }
+  uint32_t le0_eq1_ge2 = first_char_ui - '<';
+  if (num_first) {
+    le0_eq1_ge2 = 2 - le0_eq1_ge2;
+  }
+  const uint32_t next_is_eq = (cur_param[offset] == '=');
+  *offset_ptr = offset + next_is_eq;
+  *etype_ptr = S_CAST(CmpExprType, kCmpExprTypeLe + (2 * le0_eq1_ge2) + (next_is_eq || (first_char_ui == '=')));
+  return 1;
+}
+
+// On success, *new_str_ptr is allocated and initialized, and *offset_ptr is
+// advanced.  Initialization includes un-escaping, and possible stripping of
+// one level of double-quotes (in which case no un-escaping occurs).
+// On failure, no allocation is made.
+PglErr CmpExprNewStr(const char* cur_param, uint32_t* offset_ptr, char** new_str_ptr) {
+  uint32_t offset_start = *offset_ptr;
+  uint32_t char_ui = ctou32(cur_param[offset_start]);
+  uint32_t escape_ct = 0;
+  uint32_t slen;
+  if (char_ui == '"') {
+    // No-escape mode.
+    ++offset_start;
+    const char* str_body_start = &(cur_param[offset_start]);
+    // Still need to prohibit space.
+    const char* str_body_bound = FirstSpaceOrEoln(str_body_start);
+    const char* str_body_end = S_CAST(const char*, memchr(str_body_start, '"', str_body_bound - str_body_start));
+    if (unlikely(!str_body_end)) {
+      strcpy_k(g_textbuf, "This key or value starts with a double-quote, but does not end with one.");
+      return kPglRetInvalidCmdline;
+    }
+    slen = str_body_end - str_body_start;
+    if (unlikely(!slen)) {
+      strcpy_k(g_textbuf, "Empty key or value.");
+      return kPglRetInvalidCmdline;
+    }
+    *offset_ptr = offset_start + slen + 1;
+  } else {
+    uint32_t read_offset = offset_start;
+    while (!(kCmpExprIsKeyEnd[char_ui])) {
+      if (char_ui == '\\') {
+        // don't permit end-of-string or space
+        const uint32_t escaped_ui = ctou32(cur_param[++read_offset]);
+        if (unlikely(escaped_ui <= 32)) {
+          *offset_ptr = read_offset - 1;
+          if (!escaped_ui) {
+            strcpy_k(g_textbuf, "Invalid (trailing) backslash-escape.");
+          } else {
+            strcpy_k(g_textbuf, "Invalid backslash-escape: plink2 keys and values may not contain whitespace.");
+          }
+          return kPglRetInvalidCmdline;
+        }
+        ++escape_ct;
       }
-      *op_start_ptr = next_eq;
-      *binary_op_ptr = kCmpOperatorEq;
-      return (next_eq[1] == '=')? (&(next_eq[2])) : (&(next_eq[1]));
+      char_ui = ctou32(cur_param[++read_offset]);
     }
-    *op_start_ptr = next_gt;
-    if (next_eq == (&(next_gt[1]))) {
-      *binary_op_ptr = kCmpOperatorGeq;
-      return &(next_gt[2]);
+    slen = read_offset - offset_start - escape_ct;
+    if (unlikely(!slen)) {
+      strcpy_k(g_textbuf, "Key or value expected.");
+      return kPglRetInvalidCmdline;
     }
-    *binary_op_ptr = kCmpOperatorGe;
-    return &(next_gt[1]);
+    *offset_ptr = read_offset;
   }
-  if (next_gt == (&(next_lt[1]))) {
-    *op_start_ptr = next_lt;
-    *binary_op_ptr = kCmpOperatorNoteq;
-    return &(next_lt[2]);
+  if (unlikely(slen > kMaxIdSlen)) {
+    *offset_ptr = offset_start;
+    strcpy_k(g_textbuf, "Key or value too long (>16000 chars).");
+    return kPglRetInvalidCmdline;
   }
-  if ((!next_gt) || (next_gt > next_lt)) {
-    *op_start_ptr = next_lt;
-    if (next_eq == (&(next_lt[1]))) {
-      *binary_op_ptr = kCmpOperatorLeq;
-      return &(next_lt[2]);
+  if (unlikely(pgl_malloc(slen + 1, new_str_ptr))) {
+    return kPglRetNomem;
+  }
+  char* new_str = *new_str_ptr;
+  if (!escape_ct) {
+    memcpy(new_str, &(cur_param[offset_start]), slen);
+  } else {
+    const char* read_iter = &(cur_param[offset_start]);
+    for (uint32_t write_offset = 0; write_offset != slen; ++write_offset) {
+      char_ui = ctou32(*read_iter++);
+      if (char_ui == '\\') {
+        char_ui = ctou32(*read_iter++);
+      }
+      new_str[write_offset] = char_ui;
     }
-    *binary_op_ptr = kCmpOperatorLe;
-    return &(next_lt[1]);
   }
-  *op_start_ptr = next_gt;
-  if (next_eq == (&(next_gt[1]))) {
-    *binary_op_ptr = kCmpOperatorGeq;
-    return &(next_gt[2]);
+  new_str[slen] = '\0';
+  return kPglRetSuccess;
+}
+
+PglErr CmpExprParse(const char* const* sources, uint32_t param_ct, uint32_t min_prec, uint32_t open_lparen_ct, uint32_t* param_idx_ptr, uint32_t* offset_ptr, CmpExpr* cmp_expr_ptr) {
+  // Preconditions:
+  // - cmp_expr_ptr->etype == kCmpExprTypeNull.
+  // - CmpExprNextToken(sources, param_ct, param_idx_ptr, offset_ptr) gets the
+  //   first character of the next token to parse.
+  // Postconditions on success:
+  // - *cmp_expr_ptr has the parsed expression.
+  // - CmpExprNextToken(sources, param_ct, param_idx_ptr, offset_ptr) gets the
+  //   next token after the parsed expression (or '\0' if all tokens have been
+  //   consumed).
+  // Postconditions on failure:
+  // - (*param_idx_ptr, *offset_ptr) is the position of the parsing failure.
+  // - g_textbuf contains the main body of the error message.
+  // - cmp_expr_ptr will be correctly cleaned up by CleanupCmpExpr().
+  //
+  // Precedence levels:
+  //   3: !
+  //   2: < <= == != >= >
+  //   1: &&
+  //   0: ||
+  //
+  // Algorithm:
+  // 1. Check for leading '('.  If present, recursively parse through matching
+  //    ')', then jump to (5).
+  // 2. Check for leading '!'.  If present, bind with precedence 3 to next
+  //    boolean expression, then jump to (5).
+  // 3. Check for leading '-' or digit.  If present, parse containing boolean
+  //    expression of the form
+  //      <number> <binary operator> <key>
+  //    or
+  //      <number> <inequality op> <key> <same-direction ineq op> <number>
+  //    and then jump to (5).
+  // 4. Parse token as key, and finish parsing its containing boolean
+  //    expression.  I.e. if min_prec <= 2 and it's followed by an inequality
+  //    operator, the full expression is <key> <ineq op> <value>; otherwise we
+  //    have an existence check where the key is the entire expression.
+  // 5. If we're at end-of-input, next token is ')', or min_prec > 1, return.
+  // 6. If next token is &&, create conjunction in-place (copying current
+  //    parent to new left child) and recursively parse RHS with min_prec=1,
+  //    then jump to (5).  Can use tail call here if min_prec was already 1.
+  // 7. If min_prec == 1, return.
+  // 8. Next token must be || (otherwise error out).  Create disjunction
+  //    in-place (copying current parent to new left child) and recursively
+  //    parse RHS with min_prec=0, then return.  Can use tail call here.
+  uint32_t param_idx = *param_idx_ptr;
+  uint32_t offset = *offset_ptr;
+  PglErr reterr = kPglRetSuccess;
+  {
+    uint32_t lookahead_ui = CmpExprNextToken(sources, param_ct, &param_idx, &offset);
+    if (unlikely(!lookahead_ui)) {
+      // Start of predicate expected, but we reached end-of-input; innermost
+      // caller responsible for explaining why another predicate was expected.
+      // (!g_textbuf[0]) && (param_idx == param_ct)
+      g_textbuf[0] = '\0';
+      goto CmpExprParse_ret_INVALID_CMDLINE;
+    }
+    if (lookahead_ui == '(') {
+      const uint32_t lparen_param_idx = param_idx;
+      const uint32_t lparen_offset = offset;
+      ++offset;
+      reterr = CmpExprParse(sources, param_ct, 0, open_lparen_ct + 1, &param_idx, &offset, cmp_expr_ptr);
+      if (unlikely(reterr || (param_idx == param_ct))) {
+        if (reterr == kPglRetSuccess) {
+          g_textbuf[0] = '\0';
+          reterr = kPglRetInvalidCmdline;
+        }
+        if (!g_textbuf[0]) {
+          if (param_idx == param_ct) {
+            strcpy_k(g_textbuf, "This left-parenthesis lacks a matching right-parenthesis.");
+          } else {
+            strcpy_k(g_textbuf, "Invalid (empty) parenthesized expression.");
+          }
+          param_idx = lparen_param_idx;
+          offset = lparen_offset;
+        }
+        goto CmpExprParse_ret_1;
+      }
+      assert(sources[param_idx][offset] == ')');
+      ++offset;
+      // continue to possible conjunction/disjunction parse
+    } else if (unlikely(lookahead_ui == ')')) {
+      // bugfix (15 Nov 2025): forgot to enforce subexpression nonemptiness
+      assert(cmp_expr_ptr->etype == kCmpExprTypeNull);
+      // Unexpected right-parenthesis.
+      if (!open_lparen_ct) {
+        strcpy_k(g_textbuf, "This right-parenthesis lacks a matching left-parenthesis.");
+      } else {
+        // There is a matching left-parenthesis, but the current expression
+        // is incomplete; innermost caller responsible for explaining the
+        // latter.
+        // (!g_textbuf[0]) && (param_idx != param_ct)
+        g_textbuf[0] = '\0';
+      }
+      goto CmpExprParse_ret_INVALID_CMDLINE;
+    } else if (lookahead_ui == '!') {
+      CmpExpr* cmp_expr_child = CmpExprNewJct(kCmpExprTypeNot, cmp_expr_ptr);
+      if (unlikely(!cmp_expr_child)) {
+        goto CmpExprParse_ret_NOMEM;
+      }
+      const uint32_t not_param_idx = param_idx;
+      const uint32_t not_offset = offset;
+      ++offset;
+      reterr = CmpExprParse(sources, param_ct, 3, open_lparen_ct, &param_idx, &offset, cmp_expr_child);
+      if (unlikely(reterr)) {
+        if (!g_textbuf[0]) {
+          param_idx = not_param_idx;
+          offset = not_offset;
+          strcpy_k(g_textbuf, "'!' must be followed by a key or parenthesized expression.");
+        }
+        goto CmpExprParse_ret_1;
+      }
+      // continue to possible conjunction/disjunction parse
+    } else {
+      // Either binary operator, or no operator at all (key existence check).
+      //
+      // Try to parse as number; we only treat this token as a key if it fails
+      // to parse as a number here.  Note that '1000G' is a valid INFO key.
+      // (Might want to tighten key definition later, but if we do that we
+      // should enforce the same rules elsewhere.)
+      uint32_t prev_offset = offset;
+      double first_num;
+      if (CmpExprNumber(sources[param_idx], &offset, &first_num)) {
+        if (unlikely(min_prec == 3)) {
+          // shortcut: min_prec==3 means we have a ! which binds more tightly
+          // to this number than the upcoming binary operator, and we've
+          // defined that to be invalid
+          offset = prev_offset;
+          strcpy_k(g_textbuf, "'!' must be followed by a key or parenthesized expression, not a number.");
+          goto CmpExprParse_ret_INVALID_CMDLINE;
+        }
+        lookahead_ui = CmpExprNextToken(sources, param_ct, &param_idx, &offset);
+        CmpExprType first_etype;
+        if (unlikely(!CmpExprNumCompare(sources[param_idx], 1, &offset, &first_etype))) {
+          strcpy_k(g_textbuf, "Numeric comparison operator ('!=', '<', '<=', '==', '>=', '>') expected after number.");
+          goto CmpExprParse_ret_INVALID_CMDLINE;
+        }
+        lookahead_ui = CmpExprNextToken(sources, param_ct, &param_idx, &offset);
+        double second_num;
+        if (unlikely((!lookahead_ui) || (lookahead_ui == '!') || (lookahead_ui == '(') || (lookahead_ui == ')') || CmpExprNumber(sources[param_idx], &offset, &second_num))) {
+          if ((!lookahead_ui) || (lookahead_ui == ')')) {
+            strcpy_k(g_textbuf, "[number] [operator] must be followed by a key.");
+          } else {
+            strcpy_k(g_textbuf, "[number] [operator] must be followed by a key, not a new boolean expression.");
+          }
+          goto CmpExprParse_ret_INVALID_CMDLINE;
+        }
+        prev_offset = offset;
+        if (unlikely(CmpExprNumber(sources[param_idx], &offset, &second_num))) {
+          offset = prev_offset;
+          strcpy_k(g_textbuf, "[number] [operator] must be followed by a key, not a number.");
+          goto CmpExprParse_ret_INVALID_CMDLINE;
+        }
+        reterr = CmpExprNewStr(sources[param_idx], &offset, &(cmp_expr_ptr->args.kn.key));
+        if (unlikely(reterr)) {
+          goto CmpExprParse_ret_1;
+        }
+        cmp_expr_ptr->etype = first_etype;
+        cmp_expr_ptr->args.kn.value = first_num;
+        lookahead_ui = CmpExprNextToken(sources, param_ct, &param_idx, &offset);
+        // special case: permit expressions like "num1 < key < num2"
+        // note that the inequality operators are required to have compatible
+        // directions
+        prev_offset = offset;
+        CmpExprType second_etype;
+        if (CmpExprNumCompare(sources[param_idx], 0, &offset, &second_etype)) {
+          if (unlikely((first_etype == kCmpExprTypeNoteq) || (first_etype == kCmpExprTypeEq))) {
+            offset = prev_offset;
+            snprintf(g_textbuf, kTextbufSize, "\"[number] %c= [key]\" cannot be followed by another comparison operator.", (first_etype == kCmpExprTypeNoteq)? '!' : '=');
+            goto CmpExprParse_ret_INVALID_CMDLINE;
+          }
+          if (unlikely(((first_etype <= kCmpExprTypeLeq) == (second_etype <= kCmpExprTypeLeq)) || (second_etype == kCmpExprTypeNoteq) || (second_etype == kCmpExprTypeEq))) {
+            offset = prev_offset;
+            snprintf(g_textbuf, kTextbufSize, "Operator following \"[number] %c%s [key]\" must be %s.", (first_etype <= kCmpExprTypeLeq)? '>' : '<', ((first_etype == kCmpExprTypeLeq) || (first_etype == kCmpExprTypeGeq))? "=" : "", (first_etype <= kCmpExprTypeLeq)? ">= or >" : "< or <=");
+            goto CmpExprParse_ret_INVALID_CMDLINE;
+          }
+          lookahead_ui = CmpExprNextToken(sources, param_ct, &param_idx, &offset);
+          prev_offset = offset;
+          if (unlikely(!CmpExprNumber(sources[param_idx], &offset, &second_num))) {
+            strcpy_k(g_textbuf, "[number] [operator] [key] [operator] must be followed by a number.");
+            goto CmpExprParse_ret_INVALID_CMDLINE;
+          }
+          // numeric sanity checks
+          if (first_num == second_num) {
+            // simplify "x <= key <= x" down to "x == key"
+            if (unlikely(!(((first_etype == kCmpExprTypeLeq) || (first_etype == kCmpExprTypeGeq)) && (first_etype + second_etype == kCmpExprTypeLeq + kCmpExprTypeGeq)))) {
+              offset = prev_offset;
+              strcpy_k(g_textbuf, "Degenerate [number] [operator] [key] [operator] [number] expression (can't be true).");
+              goto CmpExprParse_ret_INVALID_CMDLINE;
+            }
+            cmp_expr_ptr->etype = kCmpExprTypeEq;
+          } else {
+            // prohibit "x < key < y" when x > y, etc.
+            if ((first_num < second_num) != (second_etype <= kCmpExprTypeLeq)) {
+              offset = prev_offset;
+              strcpy_k(g_textbuf, "Degenerate [number] [operator] [key] [operator] [number] expression (can't be true).");
+              goto CmpExprParse_ret_INVALID_CMDLINE;
+            }
+            char* left_key_copy = cmp_expr_ptr->args.kn.key;
+            CmpExpr* cmp_expr_child = CmpExprNewJct(kCmpExprTypeAnd, cmp_expr_ptr);
+            if (unlikely(!cmp_expr_child)) {
+              goto CmpExprParse_ret_NOMEM;
+            }
+            const uint32_t key_blen = strlen(left_key_copy) + 1;
+            if (unlikely(pgl_malloc(key_blen, &(cmp_expr_child->args.kn.key)))) {
+              goto CmpExprParse_ret_NOMEM;
+            }
+            cmp_expr_child->etype = second_etype;
+            memcpy(cmp_expr_child->args.kn.key, left_key_copy, key_blen);
+            cmp_expr_child->args.kn.value = second_num;
+          }
+        }
+      } else {
+        // Parse as key.
+        char* key;
+        reterr = CmpExprNewStr(sources[param_idx], &offset, &key);
+        if (unlikely(reterr)) {
+          goto CmpExprParse_ret_1;
+        }
+        lookahead_ui = CmpExprNextToken(sources, param_ct, &param_idx, &offset);
+        prev_offset = offset;
+        CmpExprType ineq_etype;
+        if (CmpExprNumCompare(sources[param_idx], 0, &offset, &ineq_etype)) {
+          if (unlikely(min_prec == 3)) {
+            free(key);
+            offset = prev_offset;
+            strcpy_k(g_textbuf, "![key] cannot be followed by a comparison operator. (Did you forget to put parentheses around the expression you wanted to negate with '!'?)");
+            goto CmpExprParse_ret_INVALID_CMDLINE;
+          }
+          lookahead_ui = CmpExprNextToken(sources, param_ct, &param_idx, &offset);
+          double num;
+          if (CmpExprNumber(sources[param_idx], &offset, &num)) {
+            cmp_expr_ptr->etype = ineq_etype;
+            cmp_expr_ptr->args.kn.key = key;
+            cmp_expr_ptr->args.kn.value = num;
+          } else {
+            char* str_value;
+            reterr = CmpExprNewStr(sources[param_idx], &offset, &str_value);
+            if (unlikely(reterr)) {
+              free(key);
+              goto CmpExprParse_ret_1;
+            }
+            cmp_expr_ptr->etype = S_CAST(CmpExprType, ineq_etype + (kCmpExprTypeStrNoteq - kCmpExprTypeNoteq));
+            cmp_expr_ptr->args.ks.key = key;
+            cmp_expr_ptr->args.ks.str_value = str_value;
+          }
+        } else {
+          cmp_expr_ptr->etype = kCmpExprTypeExists;
+          cmp_expr_ptr->args.k.key = key;
+        }
+      }
+    }
+    while (1) {
+      lookahead_ui = CmpExprNextToken(sources, param_ct, &param_idx, &offset);
+      if ((!lookahead_ui) || (lookahead_ui == ')')) {
+        if ((lookahead_ui == ')') && (!open_lparen_ct)) {
+          strcpy_k(g_textbuf, "This right-parenthesis lacks a matching left-parenthesis.");
+          goto CmpExprParse_ret_INVALID_CMDLINE;
+        }
+        break;
+      }
+      const uint32_t op_param_idx = param_idx;
+      const uint32_t op_offset = offset;
+      if (CmpExprAnd(sources[param_idx], &offset)) {
+        CmpExpr* cmp_expr_child = CmpExprNewJct(kCmpExprTypeAnd, cmp_expr_ptr);
+        if (unlikely(!cmp_expr_child)) {
+          goto CmpExprParse_ret_NOMEM;
+        }
+        reterr = CmpExprParse(sources, param_ct, 1, open_lparen_ct, &param_idx, &offset, cmp_expr_child);
+        if (unlikely(reterr)) {
+          if (!g_textbuf[0]) {
+            param_idx = op_param_idx;
+            offset = op_offset;
+            strcpy_k(g_textbuf, "Invalid (empty) expression after this &&.");
+          }
+          goto CmpExprParse_ret_1;
+        }
+        // end-of-input, ')', or ||.
+      } else {
+        if (min_prec >= 1) {
+          break;
+        }
+        if (unlikely(!CmpExprOr(sources[param_idx], &offset))) {
+          snprintf(g_textbuf, kTextbufSize, "Invalid token after valid expression (&&, ||, or %s expected here).", open_lparen_ct? "')'" : "end-of-input");
+          goto CmpExprParse_ret_INVALID_CMDLINE;
+        }
+        CmpExpr* cmp_expr_child = CmpExprNewJct(kCmpExprTypeOr, cmp_expr_ptr);
+        if (unlikely(!cmp_expr_child)) {
+          goto CmpExprParse_ret_NOMEM;
+        }
+        reterr = CmpExprParse(sources, param_ct, 0, open_lparen_ct, &param_idx, &offset, cmp_expr_child);
+        if (unlikely(reterr)) {
+          if (!g_textbuf[0]) {
+            param_idx = op_param_idx;
+            offset = op_offset;
+            strcpy_k(g_textbuf, "Invalid (empty) expression after this ||.");
+          }
+          goto CmpExprParse_ret_1;
+        }
+        // end-of-input or ')'
+      }
+    }
   }
-  *binary_op_ptr = kCmpOperatorGe;
-  return &(next_gt[1]);
+  while (0) {
+  CmpExprParse_ret_NOMEM:
+    reterr = kPglRetNomem;
+    break;
+  CmpExprParse_ret_INVALID_CMDLINE:
+    reterr = kPglRetInvalidCmdline;
+    break;
+  }
+ CmpExprParse_ret_1:
+  *param_idx_ptr = param_idx;
+  *offset_ptr = offset;
+  return reterr;
 }
 
 PglErr ValidateAndAllocCmpExpr(const char* const* sources, const char* flag_name, uint32_t param_ct, CmpExpr* cmp_expr_ptr) {
-  // Currently four use cases:
-  //   [pheno/covar name] [operator] [pheno val]: regular comparison
-  //   [pheno/covar name]: existence check
-  //   [INFO key] [operator] [val]: regular comparison
-  //   [INFO key]: existence check
-  // Some key/value validation is deferred to LoadPvar()/KeepRemoveIf(),
-  // since the requirements are different (e.g. no semicolons in anything
-  // INFO-related, categorical phenotypes can be assumed to not start with a
-  // valid number).
-  // May support or/and, parentheses later, but need to be careful to not slow
-  // down LoadPvar() too much in the no-INFO-filter case.
-  PglErr reterr = kPglRetSuccess;
-  {
-    if (unlikely((param_ct != 1) && (param_ct != 3))) {
-      goto ValidateAndAllocCmpExpr_ret_INVALID_EXPR_GENERIC;
+  assert(cmp_expr_ptr->etype == kCmpExprTypeNull);
+  uint32_t err_param_idx = 0;
+  uint32_t err_offset = 0;
+  PglErr reterr = CmpExprParse(sources, param_ct, 0, 0, &err_param_idx, &err_offset, cmp_expr_ptr);
+  if (unlikely(reterr == kPglRetInvalidCmdline)) {
+    logerrprintf("Error: Invalid %s expression:\n\n", flag_name);
+
+    // Render the most helpful 73-79 characters of sources[] (with "..." on the
+    // left/right when relevant), with '^' pointing to the error.
+    //
+    // 1. Compute length of input if it were to be fully rendered.
+    // 2. If it's 79 chars or less, show it all.
+    // 3. Otherwise, center it, aiming for ^ at 40th column (col_idx=39) when
+    //    that wouldn't waste any space on the left or the right.
+    uint32_t sources_blen = 0;
+    uint32_t err_col_idx = err_offset;
+    for (uint32_t param_idx = 0; param_idx != param_ct; ++param_idx) {
+      sources_blen += strlen(sources[param_idx]) + 1;
+      if (param_idx + 1 == err_param_idx) {
+        err_col_idx += sources_blen;
+      }
     }
-    const char* pheno_name_start = sources[0];
-    const char* pheno_val_start;
-    uint32_t pheno_name_slen;
-    uint32_t pheno_val_slen;
-    if (param_ct == 3) {
-      pheno_name_slen = strlen(pheno_name_start);
-      const char* op_str = sources[1];
-      uint32_t op_slen = strlen(op_str);
-      // ok to have single/double quotes around operator
-      if (op_slen > 2) {
-        const char cc = op_str[0];
-        if (((cc == '\'') || (cc == '"')) && (op_str[op_slen - 1] == cc)) {
-          ++op_str;
-          op_slen -= 2;
-        }
+    // If err_param_idx == param_ct, we effectively append two spaces to the
+    // input (so we can point to the second space).
+    if (err_param_idx == param_ct) {
+      sources_blen += 2;
+    }
+    uint32_t render_col_start = 0;
+    if ((sources_blen > 80) && (err_col_idx > 39)) {
+      if (sources_blen - err_col_idx <= 41) {
+        render_col_start = sources_blen - 80;
+      } else {
+        render_col_start = err_col_idx - 39;
       }
-      const char* op_start;
-      const char* op_end = ParseNextBinaryOp(op_str, op_slen, &op_start, &cmp_expr_ptr->binary_op);
-      if (unlikely((!op_end) || (*op_end) || (op_start != op_str))) {
-        goto ValidateAndAllocCmpExpr_ret_INVALID_EXPR_GENERIC;
-      }
-      pheno_val_start = sources[2];
-      pheno_val_slen = strlen(pheno_val_start);
-    } else {
-      // permit param_ct == 1 as long as tokens are unambiguous
-      uint32_t expr_slen = strlen(pheno_name_start);
-      const char* op_start;
-      pheno_val_start = ParseNextBinaryOp(pheno_name_start, expr_slen, &op_start, &cmp_expr_ptr->binary_op);
-      if (unlikely((!pheno_val_start) || (!(*pheno_val_start)) || (op_start == pheno_name_start))) {
-        goto ValidateAndAllocCmpExpr_ret_INVALID_EXPR_GENERIC;
-      }
-      pheno_name_slen = op_start - pheno_name_start;
-      // quasi-bugfix (13 Dec 2017): allow single argument to contain internal
-      // spaces;
-      //   --keep-if "PHENO1 > 1"
-      // is more intuitive and consistent with usage of other command-line
-      // tools than
-      //   --keep-if PHENO1 '>' 1
-      //
-      // To prevent --rerun from breaking, if there's a space after the
-      // operator, there must be a space before the operator as well, etc.
-      if (*pheno_val_start == ' ') {
-        if (unlikely(pheno_name_start[pheno_name_slen - 1] != ' ')) {
-          goto ValidateAndAllocCmpExpr_ret_INVALID_EXPR_GENERIC;
-        }
-        do {
-          ++pheno_val_start;
-        } while (*pheno_val_start == ' ');
-        do {
-          --pheno_name_slen;
-          if (unlikely(!pheno_name_slen)) {
-            goto ValidateAndAllocCmpExpr_ret_INVALID_EXPR_GENERIC;
+    }
+    memset(g_logbuf, ' ', 79);
+    const uint32_t render_col_stop = render_col_start + 79;
+    uint32_t col_start = 0;
+    for (uint32_t param_idx = 0; param_idx != param_ct; ++param_idx) {
+      const char* cur_source = sources[param_idx];
+      const uint32_t cur_source_slen = strlen(cur_source);
+      const uint32_t col_last = col_start + cur_source_slen;
+      if (col_last >= render_col_start) {
+        if (col_last >= render_col_stop) {
+          if (col_start < render_col_start) {
+            memcpy(g_logbuf, &(cur_source[render_col_start - col_start]), 79);
+          } else {
+            memcpy(&(g_logbuf[col_start - render_col_start]), cur_source, render_col_stop - col_start);
           }
-        } while (pheno_name_start[pheno_name_slen - 1] == ' ');
+          break;
+        }
+        if (col_start < render_col_start) {
+          const uint32_t cur_source_offset = render_col_start - col_start;
+          memcpy(g_logbuf, &(cur_source[cur_source_offset]), cur_source_slen - cur_source_offset);
+        } else {
+          memcpy(&(g_logbuf[col_start - render_col_start]), cur_source, cur_source_slen);
+        }
       }
-      pheno_val_slen = expr_slen - S_CAST(uintptr_t, pheno_val_start - pheno_name_start);
+      col_start = col_last + 1;
     }
-    if (unlikely(memchr(pheno_name_start, ' ', pheno_name_slen) || memchr(pheno_val_start, ' ', pheno_val_slen))) {
-      goto ValidateAndAllocCmpExpr_ret_INVALID_EXPR_GENERIC;
-    }
-    if (unlikely((pheno_name_slen > kMaxIdSlen) || (pheno_val_slen > kMaxIdSlen))) {
-      logerrprintf("Error: ID too long in %s expression.\n", flag_name);
-      goto ValidateAndAllocCmpExpr_ret_INVALID_CMDLINE;
-    }
-    if ((cmp_expr_ptr->binary_op != kCmpOperatorNoteq) && (cmp_expr_ptr->binary_op != kCmpOperatorEq)) {
-      double dxx;
-      if (unlikely(!ScantokDouble(pheno_val_start, &dxx))) {
-        logerrprintfww("Error: Invalid %s value '%s' (finite number expected).\n", flag_name, pheno_val_start);
-        goto ValidateAndAllocCmpExpr_ret_INVALID_CMDLINE;
+    if (sources_blen > 80) {
+      if (render_col_start) {
+        memcpy_k(g_logbuf, "...", 3);
+      } else if (render_col_start + 80 < sources_blen) {
+        memcpy_k(&(g_logbuf[76]), "...", 3);
       }
+      strcpy_k(&(g_logbuf[79]), "\n");
+    } else {
+      strcpy_k(&(g_logbuf[sources_blen]), "\n");
     }
-    char* new_pheno_name_buf;
-    if (unlikely(pgl_malloc(2 + pheno_name_slen + pheno_val_slen, &new_pheno_name_buf))) {
-      goto ValidateAndAllocCmpExpr_ret_NOMEM;
+    logerrputsb();
+    const uint32_t carat_leading_space_ct = err_col_idx - render_col_start;
+    memset(g_logbuf, ' ', carat_leading_space_ct);
+    strcpy_k(&(g_logbuf[carat_leading_space_ct]), "^\n");
+    logerrputsb();
+
+    const uint32_t errmsg_slen = strlen(g_textbuf);
+    char* errmsg_dst_start = g_logbuf;
+    if (errmsg_slen <= carat_leading_space_ct) {
+      const uint32_t errmsg_leading_space_ct = carat_leading_space_ct + 1 - errmsg_slen;
+      errmsg_dst_start = memseta(g_logbuf, ' ', errmsg_leading_space_ct);
     }
-    memcpyx(new_pheno_name_buf, pheno_name_start, pheno_name_slen, '\0');
-    // pheno_val_start guaranteed to be null-terminated for now
-    memcpy(&(new_pheno_name_buf[pheno_name_slen + 1]), pheno_val_start, pheno_val_slen + 1);
-    cmp_expr_ptr->pheno_name = new_pheno_name_buf;
-  }
-  while (0) {
-  ValidateAndAllocCmpExpr_ret_NOMEM:
-    reterr = kPglRetNomem;
-    break;
-  ValidateAndAllocCmpExpr_ret_INVALID_EXPR_GENERIC:
-    logerrprintf("Error: Invalid %s expression.\n", flag_name);
-  ValidateAndAllocCmpExpr_ret_INVALID_CMDLINE:
-    reterr = kPglRetInvalidCmdline;
-    break;
+    memcpy(errmsg_dst_start, g_textbuf, errmsg_slen);
+    strcpy_k(&(errmsg_dst_start[errmsg_slen]), "\n");
+    WordWrapB(0);
+    logerrputsb();
   }
   return reterr;
 }

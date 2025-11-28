@@ -38,6 +38,10 @@ namespace plink2 {
 // probable todo: try making this more parallel.  could e.g. repeatedly peek at
 // end of ReadLineStream buffer, count # of '\n's, and divvy them up between
 // worker threads.
+//
+// possible todo: https://crates.io/crates/memchr should be faster than strstr
+// when the needle is constant, port that to include/plink2_string and use it
+// here.
 CONSTI32(kLoadPvarBlockSize, 65536);
 static_assert(!(kLoadPvarBlockSize & (kLoadPvarBlockSize - 1)), "kLoadPvarBlockSize must be a power of 2.");
 static_assert(kLoadPvarBlockSize >= (kMaxMediumLine / 8), "kLoadPvarBlockSize cannot be smaller than kMaxMediumLine / 8.");
@@ -369,7 +373,7 @@ BoolErr VaridTemplateApply(unsigned char* tmp_alloc_base, const VaridTemplate* v
       return 1;
     }
     memcpy(*tmp_alloc_endp, vtp->missing_id_match, overflow_substitute_blen);
-    id_slen = 0;
+    id_slen = overflow_substitute_blen - 1;
     cur_overflow = 1;
   } else {
     if (PtrWSubCk(tmp_alloc_base, id_slen + 1, tmp_alloc_endp)) {
@@ -487,7 +491,7 @@ char* VaridTemplateWrite(const VaridTemplate* vtp, const char* ref_start, const 
     }
     const uint32_t overflow_substitute_blen = vtp->overflow_substitute_blen;
     if (overflow_substitute_blen) {
-      return memcpya(dst, vtp->missing_id_match, overflow_substitute_blen);
+      return memcpya(dst, vtp->missing_id_match, overflow_substitute_blen - 1);
     }
   }
   char* id_iter = dst;
@@ -631,6 +635,7 @@ PglErr InfoExistInit(const unsigned char* arena_end, const char* require_info_fl
 }
 
 // Returns 1 iff all keys are found.
+// (could use InfoFilter for this, but this is simple enough)
 uint32_t InfoExistCheck(const char* info_token, const InfoExist* existp) {
   const uint32_t key_ct = existp->key_ct;
   const char* prekeys_iter = existp->prekeys;
@@ -710,122 +715,365 @@ uint32_t InfoNonexistCheck(const char* info_token, const InfoExist* nonexistp) {
   return 1;
 }
 
+struct InfoExprStruct;
+
+typedef struct InfoExprNStruct {
+  double value;
+} InfoExprN;
+
+typedef struct InfoExprSStruct {
+  const char* str_value;
+  uint32_t slen;
+} InfoExprS;
+
+typedef struct InfoExprJctStruct {
+  struct InfoExprStruct* children[2];
+} InfoExprJct;
+
+typedef union {
+  InfoExprN n;
+  InfoExprS s;
+  InfoExprJct jct;
+} InfoExprArgs;
+
+typedef struct InfoExprStruct {
+  CmpExprType etype;  // normalized to remove Noteq, StrNoteq
+  uint32_t kidx;
+  uint32_t negate;
+  InfoExprArgs args;
+} InfoExpr;
+
 typedef struct InfoFilterStruct {
-  NONCOPYABLE(InfoFilterStruct);
-  char* prekey;
-  const char* val_str;
-  uint32_t key_slen;
-  uint32_t val_slen;
-  CmpBinaryOp binary_op;
-  double val;
+  InfoExpr expr;
+
+  const char* const* prekeys;  // ;<key>;
+  uint32_t* keyeq_slens;  // includes =, does not include ;
+
+  const char** cur_str_values;  // nullptr = unparsed, ';' = nonexistent
+  double* cur_values;  // INFINITY = unparsed, -INFINITY = invalid
+
+  uint32_t key_ct;
 } InfoFilter;
 
-PglErr InfoFilterInit(const unsigned char* arena_end, const CmpExpr* filter_exprp, const char* flagname_p, unsigned char** arena_base_ptr, InfoFilter* filterp) {
-  const char* pheno_name = filter_exprp->pheno_name;
-  const char* pheno_name_end_or_invalid = strchrnul3(pheno_name, ';', '=', ',');
-  if (unlikely(*pheno_name_end_or_invalid)) {
-    if (*pheno_name_end_or_invalid == ';') {
-      logerrprintfww("Error: Invalid --%s key '%s' (semicolon prohibited).\n", flagname_p, pheno_name);
-    } else if (*pheno_name_end_or_invalid == '=') {
-      logerrprintfww("Error: Invalid --%s key '%s' ('=' prohibited).\n", flagname_p, pheno_name);
+PglErr InfoFilterFirstPass(char* arena_end_c, const CmpExpr* cmp_expr, char* prekey_base, char** prekey_alloc_ptr, uint32_t* key_ct_ptr, uintptr_t* val_blen_sum_ptr) {
+  PglErr reterr = kPglRetSuccess;
+  {
+    const CmpExprType etype = cmp_expr->etype;
+    if (!CmpExprIsJct(etype)) {
+      assert(etype != kCmpExprTypeNull);
+      const char* key;
+      // in KS case, prepare to make a local copy of the string
+      const char* str_value = nullptr;
+      if (etype == kCmpExprTypeExists) {
+        key = cmp_expr->args.k.key;
+      } else if (etype <= kCmpExprTypeGeq) {
+        key = cmp_expr->args.kn.key;
+      } else {
+        key = cmp_expr->args.ks.key;
+        str_value = cmp_expr->args.ks.str_value;
+        const char* str_value_end_or_invalid = strchrnul2(str_value, ';', '=');
+        if (*str_value_end_or_invalid) {
+          if (unlikely(*str_value_end_or_invalid == '=')) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --{extract,exclude}-if-info value '%s' ('=' prohibited).\n", str_value);
+            goto InfoFilterFirstPass_ret_INVALID_CMDLINE_WW;
+          } else if (unlikely(str_value_end_or_invalid[1])) {
+            logerrprintfww("Error: Invalid --{extract,exclude}-if-info value '%s' (semicolon prohibited, unless by itself to specify empty-string).\n", str_value);
+            goto InfoFilterFirstPass_ret_INVALID_CMDLINE_WW;
+          }
+          // Empty-string special case.
+          str_value = &(str_value[1]);
+        }
+        // don't bother to deduplicate str_values for now
+        *val_blen_sum_ptr += 1 + S_CAST(uintptr_t, str_value_end_or_invalid - str_value);
+      }
+      const uint32_t key_slen = strlen(key);
+      const uint32_t prev_key_ct = *key_ct_ptr;
+      char* prekey_iter = prekey_base;
+      uint32_t kidx = 0;
+      // ok for this to be quadratic
+      for (; kidx != prev_key_ct; ++kidx) {
+        const uint32_t prekey_slen = strlen(prekey_iter);
+        if ((key_slen == prekey_slen - 2) && memequal(key, &(prekey_iter[1]), key_slen)) {
+          break;
+        }
+        prekey_iter = &(prekey_iter[prekey_slen + 1]);
+      }
+      if (kidx == prev_key_ct) {
+        assert(*prekey_alloc_ptr == prekey_iter);
+        if (unlikely(S_CAST(uintptr_t, arena_end_c - prekey_iter) < key_slen + 3)) {
+          goto InfoFilterFirstPass_ret_NOMEM;
+        }
+        *prekey_iter++ = ';';
+        prekey_iter = memcpya(prekey_iter, key, key_slen);
+        prekey_iter = memcpya(prekey_iter, "=", 2);
+        *prekey_alloc_ptr = prekey_iter;
+        *key_ct_ptr = prev_key_ct + 1;
+      }
     } else {
-      logerrprintfww("Error: Invalid --%s key '%s' (comma prohibited).\n", flagname_p, pheno_name);
+      const uint32_t child_ct = 1 + (etype != kCmpExprTypeNot);
+      for (uint32_t child_idx = 0; child_idx != child_ct; ++child_idx) {
+        reterr = InfoFilterFirstPass(arena_end_c, cmp_expr->args.jct.children[child_idx], prekey_base, prekey_alloc_ptr, key_ct_ptr, val_blen_sum_ptr);
+        if (unlikely(reterr)) {
+          goto InfoFilterFirstPass_ret_1;
+        }
+      }
     }
-    return kPglRetInvalidCmdline;
   }
-  uint32_t key_slen = pheno_name_end_or_invalid - pheno_name;
-  const uintptr_t cur_alloc = RoundUpPow2(3 + key_slen, kCacheline);
-  if (unlikely(S_CAST(uintptr_t, arena_end - (*arena_base_ptr)) < cur_alloc)) {
-    return kPglRetNomem;
+  while (0) {
+  InfoFilterFirstPass_ret_NOMEM:
+    reterr = kPglRetNomem;
+    break;
+  InfoFilterFirstPass_ret_INVALID_CMDLINE_WW:
+    WordWrapB(0);
+    logerrputsb();
+    reterr = kPglRetInvalidCmdline;
+    break;
   }
-  filterp->prekey = R_CAST(char*, *arena_base_ptr);
-  (*arena_base_ptr) += cur_alloc;
-  filterp->prekey[0] = ';';
-  char* key_iter = memcpya(&(filterp->prekey[1]), pheno_name, key_slen);
-  strcpy_k(key_iter, "=");
-  ++key_slen;
-  filterp->key_slen = key_slen;
-  filterp->val_str = nullptr;
-  filterp->val_slen = 0;
-  const CmpBinaryOp binary_op = filter_exprp->binary_op;
-  filterp->binary_op = binary_op;
-  // shouldn't need to initialize val
-
-  const char* val_str = &(pheno_name[key_slen]);
-  // bugfix (14 Dec 2017): INFO string constants are not guaranteed to start in
-  // a letter.  Only interpret the value as a number if ScanadvDouble()
-  // consumes the entire value string.
-  const char* val_num_end = ScanadvDouble(val_str, &filterp->val);
-  if (val_num_end && (!val_num_end[0])) {
-    return kPglRetSuccess;
-  }
-  if (unlikely((binary_op != kCmpOperatorNoteq) && (binary_op != kCmpOperatorEq))) {
-    logerrprintfww("Error: Invalid --%s value '%s' (finite number expected).\n", flagname_p, val_str);
-    return kPglRetInvalidCmdline;
-  }
-  const char* val_str_end_or_invalid = strchrnul2(val_str, ';', '=');
-  if (*val_str_end_or_invalid) {
-    if (unlikely(*val_str_end_or_invalid == '=')) {
-      logerrprintfww("Error: Invalid --%s value '%s' ('=' prohibited).\n", flagname_p, val_str);
-      return kPglRetInvalidCmdline;
-    } else if (unlikely(val_str_end_or_invalid[1])) {
-      logerrprintfww("Error: Invalid --%s value '%s' (semicolon prohibited, unless by itself to specify empty-string).\n", flagname_p, val_str);
-      return kPglRetInvalidCmdline;
-    }
-    // Empty-string special case.
-    filterp->val_str = &(val_str[1]);
-    return kPglRetSuccess;
-  }
-  filterp->val_str = val_str;
-  filterp->val_slen = val_str_end_or_invalid - val_str;
-  return kPglRetSuccess;
+ InfoFilterFirstPass_ret_1:
+  return reterr;
 }
 
-uint32_t InfoConditionSatisfied(const char* info_token, const InfoFilter* filterp) {
-  const char* prekey = filterp->prekey;
-  const uint32_t key_slen = filterp->key_slen;
-  const CmpBinaryOp binary_op = filterp->binary_op;
-  const char* possible_hit;
-  // search for "[key]=" at start or ";[key]=" later; key_slen includes the
-  //   trailing =
-  if (memequal(info_token, &(prekey[1]), key_slen)) {
-    possible_hit = &(info_token[key_slen]);
-  } else {
-    possible_hit = strstr(info_token, prekey);
-    if (!possible_hit) {
-      return (binary_op == kCmpOperatorNoteq);
+int32_t bsearch_prekeys(const char* key, const char* const* prekeys, uint32_t key_slen, uint32_t end_idx) {
+  uint32_t start_idx = 0;
+  while (start_idx < end_idx) {
+    const uint32_t mid_idx = (start_idx + end_idx) / 2;
+    const char* candidate_key_start = &(prekeys[mid_idx][1]);
+    int32_t ii = Memcmp(key, &(prekeys[mid_idx][1]), key_slen);
+    if (ii == 0) {
+      ii = S_CAST(int32_t, '=') - S_CAST(int32_t, ctou32(candidate_key_start[key_slen]));
+      if (ii == 0) {
+        return mid_idx;
+      }
     }
-    possible_hit = &(possible_hit[key_slen + 1]);
+    if (ii > 0) {
+      start_idx = mid_idx + 1;
+    } else {
+      end_idx = mid_idx;
+    }
   }
-  if (filterp->val_str) {
-    const uint32_t val_slen = filterp->val_slen;
-    const uint32_t mismatch = ((!memequal(possible_hit, filterp->val_str, val_slen)) || (possible_hit[val_slen] && (possible_hit[val_slen] != ';')));
-    return mismatch ^ (binary_op != kCmpOperatorNoteq);
+  return -1;
+}
+
+// exprp->negate assumed to be initialized, other fields need not be
+PglErr InfoFilterSecondPass(const unsigned char* arena_end, const CmpExpr* cmp_expr, const char* const* prekeys, uint32_t key_ct, unsigned char** arena_base_ptr, char** str_value_alloc_ptr, InfoExpr* exprp) {
+  PglErr reterr = kPglRetSuccess;
+  {
+    CmpExprType etype;
+    while (1) {
+      etype = cmp_expr->etype;
+      if (etype != kCmpExprTypeNot) {
+        break;
+      }
+      exprp->negate = 1 - exprp->negate;
+      cmp_expr = cmp_expr->args.jct.children[0];
+    }
+    exprp->etype = etype;
+    if (!CmpExprIsJct(etype)) {
+      const char* key;
+      if (etype == kCmpExprTypeExists) {
+        key = cmp_expr->args.k.key;
+      } else if (etype <= kCmpExprTypeGeq) {
+        key = cmp_expr->args.kn.key;
+      } else {
+        key = cmp_expr->args.ks.key;
+      }
+      int32_t ii = bsearch_prekeys(key, prekeys, strlen(key), key_ct);
+      assert(ii != -1);
+      exprp->kidx = ii;
+      if (etype <= kCmpExprTypeGeq) {
+        if (etype != kCmpExprTypeExists) {
+          exprp->args.n.value = cmp_expr->args.kn.value;
+          if (etype == kCmpExprTypeNoteq) {
+            exprp->etype = kCmpExprTypeEq;
+            exprp->negate = 1 - exprp->negate;
+          }
+        }
+      } else {
+        const char* str_value = cmp_expr->args.ks.str_value;
+        if (str_value[0] == ';') {
+          // Empty-string special case.  Previously validated.
+          str_value = &(str_value[1]);
+        }
+        const uint32_t str_value_blen = 1 + strlen(str_value);
+        memcpy(*str_value_alloc_ptr, str_value, str_value_blen);
+        *str_value_alloc_ptr += str_value_blen;
+        exprp->args.s.str_value = str_value;
+        if (etype == kCmpExprTypeStrNoteq) {
+          exprp->etype = kCmpExprTypeStrEq;
+          exprp->negate = 1 - exprp->negate;
+        }
+      }
+    } else {
+      if (unlikely(S_CAST(uintptr_t, arena_end - (*arena_base_ptr)) < RoundUpPow2(2 * sizeof(InfoExpr), kCacheline))) {
+        goto InfoFilterSecondPass_ret_NOMEM;
+      }
+      InfoExpr* children = R_CAST(InfoExpr*, *arena_base_ptr);
+      (*arena_base_ptr) += kCacheline;
+      for (uint32_t child_idx = 0; child_idx != 2; ++child_idx) {
+        InfoExpr* cur_child = &(children[child_idx]);
+        exprp->args.jct.children[child_idx] = cur_child;
+        cur_child->negate = 0;
+        reterr = InfoFilterSecondPass(arena_end, cmp_expr->args.jct.children[child_idx], prekeys, key_ct, arena_base_ptr, str_value_alloc_ptr, cur_child);
+        if (unlikely(reterr)) {
+          goto InfoFilterSecondPass_ret_1;
+        }
+      }
+    }
   }
-  // bugfix (3 Jan 2020): semicolon (or \0) terminator expected, can't use
-  // ScantokDouble
-  double dxx;
-  const char* scan_end = ScanadvDouble(possible_hit, &dxx);
-  if ((!scan_end) || ((*scan_end != ';') && (*scan_end))) {
-    return (binary_op == kCmpOperatorNoteq);
+  while (0) {
+  InfoFilterSecondPass_ret_NOMEM:
+    reterr = kPglRetNomem;
+    break;
   }
-  const double val = filterp->val;
-  switch (binary_op) {
-  case kCmpOperatorNoteq:
-    return (dxx != val);
-  case kCmpOperatorLe:
-    return (dxx < val);
-  case kCmpOperatorLeq:
-    return (dxx <= val);
-  case kCmpOperatorGe:
-    return (dxx > val);
-  case kCmpOperatorGeq:
-    return (dxx >= val);
-  case kCmpOperatorEq:
-    return (dxx == val);
+ InfoFilterSecondPass_ret_1:
+  return reterr;
+}
+
+PglErr InfoFilterInit(unsigned char* arena_end, const CmpExpr* cmp_expr, unsigned char** arena_base_ptr, InfoFilter* filterp) {
+  PglErr reterr = kPglRetSuccess;
+  {
+    // First pass: Copy unique keys to arena (adding ; in front and = after),
+    //             count number of distinct keys, validate str_values and
+    //             reserve space for them.
+    // Intermission: Allocate and initialize filterp->prekeys and
+    //               filterp->keyeq_slens.  Allocate cur_values and
+    //               cur_str_values.
+    // Second pass: Allocate and initialize InfoExpr nodes and str_values.
+    char* arena_end_c = R_CAST(char*, arena_end);
+    char* prekey_base = R_CAST(char*, *arena_base_ptr);
+    char* prekey_and_str_value_alloc = prekey_base;
+    uintptr_t val_blen_sum = 0;
+    uint32_t key_ct = 0;
+    reterr = InfoFilterFirstPass(arena_end_c, cmp_expr, prekey_base, &prekey_and_str_value_alloc, &key_ct, &val_blen_sum);
+    if (unlikely(reterr)) {
+      goto InfoFilterInit_ret_1;
+    }
+    if (unlikely(S_CAST(uintptr_t, arena_end_c - prekey_and_str_value_alloc) < val_blen_sum)) {
+      goto InfoFilterInit_ret_NOMEM;
+    }
+    ArenaBaseSet(&(prekey_and_str_value_alloc[val_blen_sum]), arena_base_ptr);
+    const char** prekeys_mutable;
+    uint32_t* keyeq_slens;
+    if (unlikely(arena_alloc_kcp(arena_end, key_ct, arena_base_ptr, &prekeys_mutable) ||
+                 arena_alloc_u32(arena_end, key_ct, arena_base_ptr, &keyeq_slens) ||
+                 arena_alloc_kcp(arena_end, key_ct, arena_base_ptr, &(filterp->cur_str_values)) ||
+                 arena_alloc_d(arena_end, key_ct, arena_base_ptr, &(filterp->cur_values)))) {
+      goto InfoFilterInit_ret_NOMEM;
+    }
+    filterp->keyeq_slens = keyeq_slens;
+    char* prekey_iter = prekey_base;
+    for (uint32_t kidx = 0; kidx != key_ct; ++kidx) {
+      prekeys_mutable[kidx] = prekey_iter;
+      const uint32_t prekey_slen = strlen(prekey_iter);
+      prekey_iter = &(prekey_iter[prekey_slen + 1]);
+    }
+    StrptrArrSortOverread(key_ct, prekeys_mutable);
+    const char* const* prekeys = prekeys_mutable;
+    filterp->prekeys = prekeys;
+    for (uint32_t kidx = 0; kidx != key_ct; ++kidx) {
+      keyeq_slens[kidx] = strlen(prekeys[kidx]) - 1;
+    }
+    filterp->key_ct = key_ct;
+    filterp->expr.negate = 0;
+
+    reterr = InfoFilterSecondPass(arena_end, cmp_expr, prekeys, key_ct, arena_base_ptr, &prekey_and_str_value_alloc, &(filterp->expr));
+    if (unlikely(reterr)) {
+      goto InfoFilterInit_ret_1;
+    }
   }
-  // should be unreachable, but some gcc versions complain
-  return 0;
+  while (0) {
+  InfoFilterInit_ret_NOMEM:
+    reterr = kPglRetNomem;
+    break;
+  }
+ InfoFilterInit_ret_1:
+  return reterr;
+}
+
+static_assert(kCmpExprTypeOr == kCmpExprTypeAnd + 1, "InfoConditionSatisfiedInternal() must be updated.");
+uint32_t InfoConditionSatisfiedInternal(const InfoExpr* exprp, const char* info_token, InfoFilter* filterp) {
+  const CmpExprType etype = exprp->etype;
+  const uint32_t negate = exprp->negate;
+  if (!CmpExprIsJct(etype)) {
+    const uint32_t kidx = exprp->kidx;
+    const char** str_value_ptr = &(filterp->cur_str_values[kidx]);
+    const char* str_value = *str_value_ptr;
+    if (!str_value) {
+      const char* prekey = filterp->prekeys[kidx];
+      const uint32_t keyeq_slen = filterp->keyeq_slens[kidx];
+      if (memequal(info_token, &(prekey[1]), keyeq_slen)) {
+        str_value = &(info_token[keyeq_slen]);
+      } else {
+        str_value = strstr(info_token, prekey);
+        if (!str_value) {
+          // ';'
+          str_value = &(g_one_char_strs[118]);
+        } else {
+          str_value = &(str_value[keyeq_slen + 1]);
+        }
+      }
+      *str_value_ptr = str_value;
+    }
+    if (*str_value == ';') {
+      // key doesn't exist
+      return negate;
+    }
+    if (etype <= kCmpExprTypeGeq) {
+      if (etype == kCmpExprTypeExists) {
+        return !negate;
+      }
+      double* cur_value_ptr = &(filterp->cur_values[kidx]);
+      double value = *cur_value_ptr;
+      if (value == S_CAST(double, INFINITY)) {
+        const char* scan_end = ScanadvDouble(str_value, &value);
+        if ((!scan_end) || ((*scan_end != ';') && (*scan_end))) {
+          value = S_CAST(double, -INFINITY);
+        }
+        *cur_value_ptr = value;
+      }
+      if (value == S_CAST(double, -INFINITY)) {
+        // value cannot be parsed as a number
+        return negate;
+      }
+      const double cmp_value = exprp->args.n.value;
+      if (etype == kCmpExprTypeEq) {
+        return (value == cmp_value) != negate;
+      } else if (etype < kCmpExprTypeEq) {
+        if (etype == kCmpExprTypeLe) {
+          return (value < cmp_value) != negate;
+        } else {
+          return (value <= cmp_value) != negate;
+        }
+      } else {
+        if (etype == kCmpExprTypeGe) {
+          return (value > cmp_value) != negate;
+        } else {
+          return (value >= cmp_value) != negate;
+        }
+      }
+    } else {
+      const char* cmp_str = exprp->args.s.str_value;
+      const uint32_t cmp_slen = exprp->args.s.slen;
+      const uint32_t is_match = memequal(str_value, cmp_str, cmp_slen) && (!(str_value[cmp_slen] && (str_value[cmp_slen] != ';')));
+      return is_match != negate;
+    }
+  }
+  const uint32_t first_result = InfoConditionSatisfiedInternal(exprp->args.jct.children[0], info_token, filterp);
+  // short-circuit: if kCmpExprTypeAnd, can return 0; if Or, can return 1
+  if (first_result == etype - kCmpExprTypeAnd) {
+    return first_result != negate;
+  }
+  return InfoConditionSatisfiedInternal(exprp->args.jct.children[1], info_token, filterp) != negate;
+}
+
+uint32_t InfoConditionSatisfied(const char* info_token, InfoFilter* filterp) {
+  const uint32_t key_ct = filterp->key_ct;
+  ZeroPtrArr(key_ct, filterp->cur_str_values);
+  double* cur_values = filterp->cur_values;
+  for (uint32_t kidx = 0; kidx != key_ct; ++kidx) {
+    cur_values[kidx] = S_CAST(double, INFINITY);
+  }
+  return InfoConditionSatisfiedInternal(&(filterp->expr), info_token, filterp);
 }
 
 PglErr SplitPar(const uint32_t* variant_bps, UnsortedVar vpos_sortstatus, uint32_t splitpar_bound1, uint32_t splitpar_bound2, uintptr_t* variant_include, uintptr_t* loaded_chr_mask, ChrInfo* cip, uint32_t* chrs_encountered_m1_ptr, uint32_t* exclude_ct_ptr) {
@@ -906,7 +1154,7 @@ PglErr SplitPar(const uint32_t* variant_bps, UnsortedVar vpos_sortstatus, uint32
   return kPglRetSuccess;
 }
 
-PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattened, const char* varid_template_str, const char* varid_multi_template_str, const char* varid_multi_nonsnp_template_str, const char* missing_varid_match, const char* require_info_flattened, const char* require_no_info_flattened, const CmpExpr* extract_if_info_exprp, const CmpExpr* exclude_if_info_exprp, MiscFlags misc_flags, PvarPsamFlags pvar_psam_flags, uint32_t xheader_needed, uint32_t qualfilter_needed, float var_min_qual, uint32_t splitpar_bound1, uint32_t splitpar_bound2, uint32_t new_variant_id_max_allele_slen, uint32_t snps_only, uint32_t exclude_palindromic_snps, uint32_t split_chr_ok, uint32_t filter_min_allele_ct, uint32_t filter_max_allele_ct, char input_missing_geno_char, uint32_t max_thread_ct, ChrInfo* cip, uint32_t* max_variant_id_slen_ptr, uint32_t* info_reload_slen_ptr, UnsortedVar* vpos_sortstatus_ptr, char** xheader_ptr, uintptr_t** variant_include_ptr, uint32_t** variant_bps_ptr, char*** variant_ids_ptr, uintptr_t** allele_idx_offsets_ptr, const char*** allele_storage_ptr, uintptr_t** qual_present_ptr, float** quals_ptr, uintptr_t** filter_present_ptr, uintptr_t** filter_npass_ptr, char*** filter_storage_ptr, uintptr_t** nonref_flags_ptr, double** variant_cms_ptr, ChrIdx** chr_idxs_ptr, uint32_t* raw_variant_ct_ptr, uint32_t* variant_ct_ptr, uint32_t* max_allele_ct_ptr, uint32_t* max_allele_slen_ptr, uintptr_t* xheader_blen_ptr, InfoFlags* info_flags_ptr, uint32_t* max_filter_slen_ptr) {
+PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattened, const char* varid_template_str, const char* varid_multi_template_str, const char* varid_multi_nonsnp_template_str, const char* missing_varid_match, const char* require_info_flattened, const char* require_no_info_flattened, const CmpExpr* extract_if_info_exprp, const CmpExpr* exclude_if_info_exprp, MiscFlags misc_flags, PvarPsamFlags pvar_psam_flags, LoadFilterLogFlags load_filter_log_flags, uint32_t xheader_needed, uint32_t qualfilter_needed, float var_min_qual, uint32_t splitpar_bound1, uint32_t splitpar_bound2, uint32_t new_variant_id_max_allele_slen, uint32_t snps_only_just_acgt, uint32_t split_chr_ok, uint32_t filter_min_allele_ct, uint32_t filter_max_allele_ct, char input_missing_geno_char, uint32_t max_thread_ct, ChrInfo* cip, uint32_t* max_variant_id_slen_ptr, uint32_t* info_reload_slen_ptr, UnsortedVar* vpos_sortstatus_ptr, char** xheader_ptr, uintptr_t** variant_include_ptr, uint32_t** variant_bps_ptr, char*** variant_ids_ptr, uintptr_t** allele_idx_offsets_ptr, const char*** allele_storage_ptr, uintptr_t** qual_present_ptr, float** quals_ptr, uintptr_t** filter_present_ptr, uintptr_t** filter_npass_ptr, char*** filter_storage_ptr, uintptr_t** nonref_flags_ptr, double** variant_cms_ptr, ChrIdx** chr_idxs_ptr, uint32_t* raw_variant_ct_ptr, uint32_t* variant_ct_ptr, uint32_t* neg_bp_seen_ptr, uint32_t* max_allele_ct_ptr, uint32_t* max_allele_slen_ptr, uintptr_t* xheader_blen_ptr, InfoFlags* info_flags_ptr, uint32_t* max_filter_slen_ptr) {
   // chr_info, max_variant_id_slen, and info_reload_slen are in/out; just
   // outparameters after them.  (Due to its large size in some VCFs, INFO is
   // not kept in memory for now.  This has a speed penalty, of course; maybe
@@ -1062,7 +1310,7 @@ PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattene
       *xheader_blen_ptr = xheader_end - (*xheader_ptr);
       BigstackBaseSet(xheader_end);
     }
-    FinalizeChrset(misc_flags, cip);
+    FinalizeChrset(load_filter_log_flags, cip);
     const char** allele_storage = R_CAST(const char**, g_bigstack_base);
     const char** allele_storage_iter = allele_storage;
 
@@ -1138,7 +1386,7 @@ PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattene
           info_col_present = 1;
         } else if (token_slen == 6) {
           if (memequal_sk(linebuf_iter, "FILTER")) {
-            load_filter_col = 2 * ((pvar_psam_flags & (kfPvarColMaybefilter | kfPvarColFilter)) || qualfilter_needed) + ((misc_flags / kfMiscExcludePvarFilterFail) & 1);
+            load_filter_col = 2 * ((pvar_psam_flags & (kfPvarColMaybefilter | kfPvarColFilter)) || qualfilter_needed) + ((load_filter_log_flags / kfLoadFilterLogVarFilter) & 1);
             if (!load_filter_col) {
               continue;
             }
@@ -1265,23 +1513,36 @@ PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattene
         goto LoadPvar_ret_1;
       }
     }
-    InfoFilter info_keep;
-    info_keep.prekey = nullptr;
-    if (extract_if_info_exprp->pheno_name) {
-      // todo: also print warning (or optionally error out?) if header line is
-      // missing or doesn't match type expectation
-      // (same for --require-info)
-      reterr = InfoFilterInit(tmp_alloc_end, extract_if_info_exprp, "extract-if-info", &tmp_alloc_base, &info_keep);
-      if (unlikely(reterr)) {
-        goto LoadPvar_ret_1;
-      }
-    }
-    InfoFilter info_remove;
-    info_remove.prekey = nullptr;
-    if (exclude_if_info_exprp->pheno_name) {
-      reterr = InfoFilterInit(tmp_alloc_end, exclude_if_info_exprp, "exclude-if-info", &tmp_alloc_base, &info_remove);
-      if (unlikely(reterr)) {
-        goto LoadPvar_ret_1;
+    InfoFilter info_filter;
+    info_filter.expr.etype = kCmpExprTypeNull;
+    {
+      const CmpExprType etype_incl = extract_if_info_exprp->etype;
+      const CmpExprType etype_excl = exclude_if_info_exprp->etype;
+      if (etype_incl || etype_excl) {
+        // todo: also print warning (or optionally error out?) if header line
+        // is missing or doesn't match type expectation
+        // (same for --require-info)
+        const CmpExpr* cmp_expr;
+        CmpExpr not_slot;
+        CmpExpr and_slot;
+        if (!etype_excl) {
+          cmp_expr = extract_if_info_exprp;
+        } else {
+          not_slot.etype = kCmpExprTypeNot;
+          not_slot.args.jct.children[0] = K_CAST(CmpExpr*, exclude_if_info_exprp);
+          if (etype_incl) {
+            and_slot.etype = kCmpExprTypeAnd;
+            and_slot.args.jct.children[0] = K_CAST(CmpExpr*, extract_if_info_exprp);
+            and_slot.args.jct.children[1] = &not_slot;
+            cmp_expr = &and_slot;
+          } else {
+            cmp_expr = &not_slot;
+          }
+        }
+        reterr = InfoFilterInit(tmp_alloc_end, cmp_expr, &tmp_alloc_base, &info_filter);
+        if (unlikely(reterr)) {
+          goto LoadPvar_ret_1;
+        }
       }
     }
     if (!info_col_present) {
@@ -1289,13 +1550,13 @@ PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattene
         logerrputs("Error: --require-info used on a variant file with no INFO column.\n");
         goto LoadPvar_ret_INCONSISTENT_INPUT;
       }
-      if (unlikely(info_keep.prekey)) {
+      if (unlikely(extract_if_info_exprp->etype)) {
         logerrputs("Error: --extract-if-info used on a variant file with no INFO column.\n");
         goto LoadPvar_ret_INCONSISTENT_INPUT;
       }
       info_pr_exists = 0;
       info_reload_slen = 0;
-    } else if ((!info_pr_exists) && (!info_reload_slen) && (!info_existp) && (!info_nonexistp) && (!info_keep.prekey) && (!info_remove.prekey)) {
+    } else if ((!info_pr_exists) && (!info_reload_slen) && (!info_existp) && (!info_nonexistp) && (!info_filter.expr.etype)) {
       info_col_present = 0;
     }
 
@@ -1384,6 +1645,8 @@ PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattene
     uint32_t max_filter_slen = 0;
     uint32_t exclude_ct = 0;
 
+    const uint32_t exclude_palindromic_snps = (load_filter_log_flags / kfLoadFilterLogExcludePalindromicSnps) & 1;
+    const uint32_t snps_only = (load_filter_log_flags / kfLoadFilterLogSnpsOnly) & 1;
     // only allocated when necessary
     // if we want to scale this approach to more fields, we'll need to add a
     // few pointers to the start of each block.  right now, we force cur_cms[]
@@ -1391,6 +1654,7 @@ PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattene
     // is error-prone.
     uint32_t at_least_one_npass_filter = 0;
     uint32_t at_least_one_nzero_cm = 0;
+    uint32_t neg_bp_seen = 0;
     uintptr_t new_variant_id_allele_len_overflow = 0;
     double* cur_cms = nullptr;
     uint32_t cms_start_block = UINT32_MAX;
@@ -1601,13 +1865,8 @@ PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattene
               goto LoadPvar_skip_variant;
             }
           }
-          if (info_keep.prekey) {
-            if (!InfoConditionSatisfied(info_token, &info_keep)) {
-              goto LoadPvar_skip_variant;
-            }
-          }
-          if (info_remove.prekey) {
-            if (InfoConditionSatisfied(info_token, &info_remove)) {
+          if (info_filter.expr.etype) {
+            if (!InfoConditionSatisfied(info_token, &info_filter)) {
               goto LoadPvar_skip_variant;
             }
           }
@@ -1621,6 +1880,7 @@ PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattene
         }
 
         if (cur_bp < 0) {
+          neg_bp_seen = 1;
           goto LoadPvar_skip_variant;
         }
 
@@ -1656,7 +1916,7 @@ PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattene
           if ((token_slens[2] != 1) || (remaining_alt_char_ct != 2 * extra_alt_ct + 1)) {
             goto LoadPvar_skip_variant;
           }
-          if (snps_only > 1) {
+          if (snps_only_just_acgt) {
             // just-acgt
             if (!acgtm_table[ctou32(token_ptrs[2][0])]) {
               goto LoadPvar_skip_variant;
@@ -2203,6 +2463,7 @@ PglErr LoadPvar(const char* pvarname, const char* var_filter_exceptions_flattene
     BitvecAnd(loaded_chr_mask, chr_word_ct, chr_mask);
     BigstackEndSet(tmp_alloc_end);
     *variant_ct_ptr = raw_variant_ct - exclude_ct;
+    *neg_bp_seen_ptr = neg_bp_seen;
     *vpos_sortstatus_ptr = vpos_sortstatus;
     *allele_storage_ptr = allele_storage;
     // if only INFO/PR flag present, no need to reload

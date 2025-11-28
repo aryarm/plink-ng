@@ -748,26 +748,6 @@ BoolErr bigstack_calloc_kcp(uintptr_t ct, const char*** kcp_arr_ptr);
 
 BoolErr bigstack_calloc_cpp(uintptr_t ct, char**** cpp_arr_ptr);
 
-HEADER_INLINE BoolErr bigstack_calloc_c(uintptr_t ct, char** c_arr_ptr) {
-  return bigstack_calloc_uc(ct, R_CAST(unsigned char**, c_arr_ptr));
-}
-
-HEADER_INLINE BoolErr bigstack_calloc_i16(uintptr_t ct, int16_t** i16_arr_ptr) {
-  return bigstack_calloc_u16(ct, R_CAST(uint16_t**, i16_arr_ptr));
-}
-
-HEADER_INLINE BoolErr bigstack_calloc_i32(uintptr_t ct, int32_t** i32_arr_ptr) {
-  return bigstack_calloc_u32(ct, R_CAST(uint32_t**, i32_arr_ptr));
-}
-
-HEADER_INLINE BoolErr bigstack_calloc_i64(uintptr_t ct, int64_t** i64_arr_ptr) {
-  return bigstack_calloc_u64(ct, R_CAST(uint64_t**, i64_arr_ptr));
-}
-
-HEADER_INLINE BoolErr bigstack_calloc_u32p(uintptr_t ct, uint32_t*** u32p_arr_ptr) {
-  return bigstack_calloc_w(ct, R_CAST(uintptr_t**, u32p_arr_ptr));
-}
-
 #ifdef __LP64__
 HEADER_INLINE BoolErr bigstack_calloc64_d(uint64_t ct, double** d_arr_ptr) {
   return bigstack_calloc_d(ct, d_arr_ptr);
@@ -997,6 +977,31 @@ BoolErr bigstack_end_calloc_wp(uintptr_t ct, uintptr_t*** wp_arr_ptr);
 
 BoolErr bigstack_end_calloc_cp(uintptr_t ct, char*** cp_arr_ptr);
 
+// Not sure if this is needed.
+#if (__GNUC__ >= 11) && !defined(__clang__)
+#  pragma GCC push_options
+#  pragma GCC optimize("-fno-ipa-modref")
+#endif
+HEADER_INLINE BoolErr bigstack_calloc_c(uintptr_t ct, char** c_arr_ptr) {
+  return bigstack_calloc_uc(ct, R_CAST(unsigned char**, c_arr_ptr));
+}
+
+HEADER_INLINE BoolErr bigstack_calloc_i16(uintptr_t ct, int16_t** i16_arr_ptr) {
+  return bigstack_calloc_u16(ct, R_CAST(uint16_t**, i16_arr_ptr));
+}
+
+HEADER_INLINE BoolErr bigstack_calloc_i32(uintptr_t ct, int32_t** i32_arr_ptr) {
+  return bigstack_calloc_u32(ct, R_CAST(uint32_t**, i32_arr_ptr));
+}
+
+HEADER_INLINE BoolErr bigstack_calloc_i64(uintptr_t ct, int64_t** i64_arr_ptr) {
+  return bigstack_calloc_u64(ct, R_CAST(uint64_t**, i64_arr_ptr));
+}
+
+HEADER_INLINE BoolErr bigstack_calloc_u32p(uintptr_t ct, uint32_t*** u32p_arr_ptr) {
+  return bigstack_calloc_w(ct, R_CAST(uintptr_t**, u32p_arr_ptr));
+}
+
 HEADER_INLINE BoolErr bigstack_end_calloc_c(uintptr_t ct, char** c_arr_ptr) {
   return bigstack_end_calloc_uc(ct, R_CAST(unsigned char**, c_arr_ptr));
 }
@@ -1012,6 +1017,9 @@ HEADER_INLINE BoolErr bigstack_end_calloc_i64(uintptr_t ct, int64_t** i64_arr_pt
 HEADER_INLINE BoolErr bigstack_end_calloc_kcp(uintptr_t ct, const char*** kcp_arr_ptr) {
   return bigstack_end_calloc_cp(ct, K_CAST(char***, kcp_arr_ptr));
 }
+#if (__GNUC__ >= 11) && !defined(__clang__)
+#  pragma GCC pop_options
+#endif
 
 #ifdef __LP64__
 HEADER_INLINE BoolErr bigstack_end_calloc64_w(uint64_t ct, uintptr_t** w_arr_ptr) {
@@ -1758,52 +1766,80 @@ PglErr CmdlineParsePhase3(uintptr_t max_default_mib, uintptr_t malloc_size_mib, 
 
 void CleanupPlink2CmdlineMeta(Plink2CmdlineMeta* pcmp);
 
-// order is such that (kCmpOperatorEq - x) is the inverse of x
 ENUM_U31_DEF_START()
-  kCmpOperatorNoteq,
-  kCmpOperatorLe,
-  kCmpOperatorLeq,
+  kCmpExprTypeNull,
 
-  kCmpOperatorGe,
-  kCmpOperatorGeq,
-  kCmpOperatorEq
-ENUM_U31_DEF_END(CmpBinaryOp);
+  kCmpExprTypeExists,
+
+  kCmpExprTypeLe,
+  kCmpExprTypeLeq,
+  kCmpExprTypeNoteq,
+  kCmpExprTypeEq,
+  kCmpExprTypeGe,
+  kCmpExprTypeGeq,
+
+  kCmpExprTypeStrNoteq,
+  kCmpExprTypeStrEq,
+  // possible todo: kCmpExprTypeStrNotRegex, kCmpExprTypeStrRegex
+
+  kCmpExprTypeAnd,
+  kCmpExprTypeOr,
+
+  kCmpExprTypeNot
+ENUM_U31_DEF_END(CmpExprType);
+
+HEADER_INLINE uint32_t CmpExprIsK(CmpExprType etype) {
+  return (etype == kCmpExprTypeExists);
+}
+
+HEADER_INLINE uint32_t CmpExprIsKN(CmpExprType etype) {
+  return (etype >= kCmpExprTypeLe) && (etype <= kCmpExprTypeGeq);
+}
+
+HEADER_INLINE uint32_t CmpExprIsKS(CmpExprType etype) {
+  return (etype == kCmpExprTypeStrNoteq) || (etype == kCmpExprTypeStrEq);
+}
+
+HEADER_INLINE uint32_t CmpExprIsJct(CmpExprType etype) {
+  return (etype >= kCmpExprTypeAnd);
+}
+
+struct CmpExprStruct;
+
+// <key> existence check
+typedef struct CmpExprKStruct {
+  char* key;
+} CmpExprK;
+
+// <key> <operator> <number>
+typedef struct CmpExprKNStruct {
+  double value;
+  char* key;
+} CmpExprKN;
+
+// <key> <operator> <usually-non-numeric string>
+// can force numeric-string (in)equality comparison with quotes: key/str_value
+// parser strips one pair of matched single-quotes if present
+typedef struct CmpExprKSStruct {
+  char* str_value;
+  char* key;
+} CmpExprKS;
+
+// and, or, not
+typedef struct CmpExprJctStruct {
+  struct CmpExprStruct* children[2];
+} CmpExprJct;
+
+typedef union {
+  CmpExprK k;
+  CmpExprKN kn;
+  CmpExprKS ks;
+  CmpExprJct jct;
+} CmpExprArgs;
 
 typedef struct CmpExprStruct {
-  // arguably too small for noncopyable to be a great idea, but the next
-  // iteration of this struct probably won't have that issue.
-  NONCOPYABLE(CmpExprStruct);
-  // Restrict to <key> <operator> <value> for now; key=INFO/pheno/covar.
-  //
-  // Almost certainly want to support conjunctions/disjunctions later; but
-  // there are complications regarding the command-line interface:
-  // * Phenotype/covariate names and VCFv4.2 INFO keys can contain parenthesis
-  //   and mathematical-operator characters.  And we actually need to permit at
-  //   least the latter, since autogenerated categorical-covariate names
-  //   contain '=' for a good reason.  Some sort of escaping is probably in
-  //   in order, but...
-  // * Escaping is not a big deal in a shell script, but most
-  //   conjunctions/disjunctions can already be emulated easily enough in a
-  //   shell script by calling plink2 multiple times.  While there's some
-  //   execution-time improvement, the main value-add from directly supporting
-  //   logical operations in --keep-if/--extract-if-info is reduced
-  //   interactive-use cognitive load.
-  // * We can't treat multiple command-line arguments differently from the
-  //   corresponding space-containing single command-line argument; otherwise
-  //   --rerun breaks.  So "multiple-argument-form supports keys with special
-  //   characters but not conjunctions/disjunctions; single-argument-form is
-  //   the other way around" is not an option.
-  // The least-bad solution I've thought of is to add --keep-if-file/etc. flags
-  // which read the expression from a short text file.  In that case, we'd at
-  // least be able to define normal quoting and escaping rules without worrying
-  // about confusing interactions with bash.  Deferring implementation for now
-  // in hopes of coming up with a better idea, but this should go in before
-  // beta testing begins.
-
-  // Currently stores null-terminated key, followed by null-terminated value
-  // string.  Storage format needs to be synced with ValidateAndAllocCmpExpr().
-  char* pheno_name;
-  CmpBinaryOp binary_op;
+  CmpExprType etype;
+  CmpExprArgs args;
 } CmpExpr;
 
 void InitCmpExpr(CmpExpr* cmp_expr_ptr);
@@ -1823,7 +1859,7 @@ PglErr ParseColDescriptor(const char* col_descriptor_iter, const char* supported
 // now
 // todo: recalibrate these numbers before each beta release
 #ifndef __LP64__
-  // 2047 seems to consistently fail on both OS X and Windows
+  // 2047 seems to consistently fail on both macOS and Windows
 #  ifdef _WIN32
 CONSTI32(kMalloc32bitMibMax, 1728);
 #  else

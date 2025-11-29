@@ -4,6 +4,7 @@ import sys
 import time
 import pgenlib
 import tempfile
+import warnings
 import numpy as np
 from pathlib import Path
 import concurrent.futures
@@ -166,9 +167,18 @@ def main(tmp_path, also_plot: bool = True):
             process_times_rep.append(p_time)
             shapes_rep.add(shape)
 
-        s_mean = float(np.mean(single_times_rep))
-        t_mean = float(np.mean(thread_times_rep))
-        p_mean = float(np.mean(process_times_rep))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            s_mean = float(np.mean(single_times_rep))
+            t_mean = float(np.mean(thread_times_rep))
+            p_mean = float(np.mean(process_times_rep))
+            s_median = float(np.median(single_times_rep))
+            t_median = float(np.median(thread_times_rep))
+            p_median = float(np.median(process_times_rep))
+            s_std = float(np.std(single_times_rep))
+            t_std = float(np.std(thread_times_rep))
+            p_std = float(np.std(process_times_rep))
+
         assert len(shapes_rep) == 1, "Inconsistent shapes across repetitions"
         nvars, nsamps = shapes_rep.pop()
         if nsample_actual is None:
@@ -182,24 +192,24 @@ def main(tmp_path, also_plot: bool = True):
         shapes.append(nvars)
 
         print(
-            f"nvariants={nvars}: "
-            f"single={s_mean:.3f}s, "
-            f"thread={t_mean:.3f}s, "
-            f"process={p_mean:.3f}s",
+            f"nvariants={nvars}: ",
+            f"single={s_median:.3f}s ({s_mean:.3f} ± {s_std:.3f})",
+            f"thread={t_median:.3f}s ({t_mean:.3f} ± {t_std:.3f})",
+            (f"process={p_median:.3f}s ({p_mean:.3f} ± {p_std:.3f})" if p_median < np.inf else ""),
             file=sys.stderr,
         )
 
     # Convert to numpy arrays for numeric ops
     X = np.array(shapes)
-    single_times = np.array(single_times, dtype=float)
-    thread_times = np.array(thread_times, dtype=float)
-    process_times = np.array(process_times, dtype=float)
+    single_times = np.median(np.array(single_times, dtype=float), axis=1)
+    thread_times = np.median(np.array(thread_times, dtype=float), axis=1)
+    process_times = np.median(np.array(process_times, dtype=float), axis=1)
 
     # Fit OLS models using numpy-only ols_fit_1d
     models = {
-        "Single-threaded": (np.mean(single_times, axis=1), ols_fit_1d(X, single_times, reps=num_reps)),
-        "Multi-threaded": (np.mean(thread_times, axis=1), ols_fit_1d(X, thread_times, reps=num_reps)),
-        "Multi-process": (np.mean(process_times, axis=1), ols_fit_1d(X, process_times, reps=num_reps)),
+        "Single-threaded": (single_times, ols_fit_1d(X, single_times, reps=num_reps)),
+        "Multi-threaded": (thread_times, ols_fit_1d(X, thread_times, reps=num_reps)),
+        "Multi-process": (process_times, ols_fit_1d(X, process_times, reps=num_reps)),
     }
 
     if also_plot:

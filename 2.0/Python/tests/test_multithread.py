@@ -205,7 +205,7 @@ def main(tmp_path, also_plot: bool = True):
 
         plt.xlabel(f"Number of variants\nNumber of samples fixed at {nsample_fixed}")
         plt.ylabel('Read time (s)')
-        plt.title('PgenReader Timings')
+        plt.title(f"PgenReader Benchmark with {num_cpus} CPUs")
         plt.legend()
         plt.tight_layout()
         output_file_path = str(tmp_path / 'timings_plot.png')

@@ -118,7 +118,7 @@ def bench_instance(pgen_path: Path):
     thread = threaded_timed_read(pgen_path, single_arr=single_arr)
     proc = process_timed_read(pgen_path, single_arr=single_arr)
 
-    return single, thread, proc
+    return single, thread, proc, single_arr.shape
 
 def ols_fit_1d(x: np.ndarray, y: np.ndarray, reps: int = 1):
     """
@@ -145,7 +145,9 @@ def main(tmp_path, also_plot: bool = True):
     single_times = []
     thread_times = []
     process_times = []
+    shapes = []
 
+    nsample_actual = None
     for nvariant_limit in nvariant_limits:
         pgen_dir = tmp_path / f"sample_{nvariant_limit}"
         # generate_large_pgen is assumed to return a path to the generated pgen file
@@ -154,24 +156,33 @@ def main(tmp_path, also_plot: bool = True):
         single_times_rep = []
         thread_times_rep = []
         process_times_rep = []
+        shapes_rep = set()
 
         # collect several repetitions properly (previous code overwrote lists)
         for rep in range(num_reps):
-            s_time, t_time, p_time = bench_instance(pgen_path)
+            s_time, t_time, p_time, shape = bench_instance(pgen_path)
             single_times_rep.append(s_time)
             thread_times_rep.append(t_time)
             process_times_rep.append(p_time)
+            shapes_rep.add(shape)
 
         s_mean = float(np.mean(single_times_rep))
         t_mean = float(np.mean(thread_times_rep))
         p_mean = float(np.mean(process_times_rep))
+        assert len(shapes_rep) == 1, "Inconsistent shapes across repetitions"
+        nvars, nsamps = shapes_rep.pop()
+        if nsample_actual is None:
+            nsample_actual = int(nsamps // 2)
+        else:
+            assert nsample_actual == int(nsamps // 2), "Inconsistent sample counts across different nvariant runs"
 
         single_times.append(single_times_rep)
         thread_times.append(thread_times_rep)
         process_times.append(process_times_rep)
+        shapes.append(nvars)
 
         print(
-            f"nvariant_limit={nvariant_limit}: "
+            f"nvariants={nvars}: "
             f"single={s_mean:.3f}s, "
             f"thread={t_mean:.3f}s, "
             f"process={p_mean:.3f}s",
@@ -179,16 +190,16 @@ def main(tmp_path, also_plot: bool = True):
         )
 
     # Convert to numpy arrays for numeric ops
-    X = nvariant_limits.astype(float)
-    single_times = np.mean(np.array(single_times, dtype=float), axis=1)
-    thread_times = np.mean(np.array(thread_times, dtype=float), axis=1)
-    process_times = np.mean(np.array(process_times, dtype=float), axis=1)
+    X = np.array(shapes)
+    single_times = np.array(single_times, dtype=float)
+    thread_times = np.array(thread_times, dtype=float)
+    process_times = np.array(process_times, dtype=float)
 
     # Fit OLS models using numpy-only ols_fit_1d
     models = {
-        "Single-threaded": (single_times, ols_fit_1d(X, single_times, reps=num_reps)),
-        "Multi-threaded": (thread_times, ols_fit_1d(X, thread_times, reps=num_reps)),
-        "Multi-process": (process_times, ols_fit_1d(X, process_times, reps=num_reps)),
+        "Single-threaded": (np.mean(single_times, axis=1), ols_fit_1d(X, single_times, reps=num_reps)),
+        "Multi-threaded": (np.mean(thread_times, axis=1), ols_fit_1d(X, thread_times, reps=num_reps)),
+        "Multi-process": (np.mean(process_times, axis=1), ols_fit_1d(X, process_times, reps=num_reps)),
     }
 
     if also_plot:
@@ -199,11 +210,11 @@ def main(tmp_path, also_plot: bool = True):
             if np.isnan(slope):
                 continue
             print(f"{label} slope: {slope}", file=sys.stderr)
-            line, = plt.plot(nvariant_limits, times, 'o-', label=f"{label} (slope={slope:.5e})")
+            line, = plt.plot(X, times, 'o', label=f"{label} (slope={slope:.5e})")
             y_pred = intercept + slope * X
-            plt.plot(nvariant_limits, y_pred, '--', color=line.get_color())
+            plt.plot(X, y_pred, '--', color=line.get_color())
 
-        plt.xlabel(f"Number of variants\nNumber of samples fixed at {nsample_fixed}")
+        plt.xlabel(f"Number of variants\nNumber of samples fixed at {nsample_actual}")
         plt.ylabel('Read time (s)')
         plt.title(f"PgenReader Benchmark with {num_cpus} CPUs")
         plt.legend()
